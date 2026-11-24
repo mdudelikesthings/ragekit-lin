@@ -1,0 +1,16 @@
+[package]
+name = "ragekit-cli"
+description = "Command-line GTA V archive tool for Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ragekit"
+path = "src/main.rs"
+
+[dependencies]
+ragekit-rpf = { path = "../ragekit-rpf" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+dirs = "6"
