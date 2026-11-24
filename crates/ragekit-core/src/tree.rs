@@ -645,7 +645,7 @@ impl Tree {
     }
 
     /// Write the archive in its own format (GTA V: OPEN RPF7).
-    pub fn write<W: Write>(&self, w: &mut W) -> Result<u64> {
+    pub fn write<W: Write + ?Sized>(&self, w: &mut W) -> Result<u64> {
         match self.format {
             Format::Rpf7 => self.write_rpf7(w, Encryption::Open),
             Format::Rpf2 => crate::gta4::write_rpf2(self, w),
@@ -656,7 +656,7 @@ impl Tree {
 
     /// Write a GTA V archive. `enc` may be `Open` (recommended), `None` or
     /// `Aes` (needs the AES key). NG output is not supported.
-    pub fn write_rpf7<W: Write>(&self, w: &mut W, enc: Encryption) -> Result<u64> {
+    pub fn write_rpf7<W: Write + ?Sized>(&self, w: &mut W, enc: Encryption) -> Result<u64> {
         crate::rpf7_write::write(self, w, enc)
     }
 
@@ -695,12 +695,12 @@ pub(crate) struct Flat<'a> {
 }
 
 /// Counts bytes written.
-pub(crate) struct Counting<'a, W: Write> {
+pub(crate) struct Counting<'a, W: Write + ?Sized> {
     pub inner: &'a mut W,
     pub n: u64,
 }
 
-impl<W: Write> Counting<'_, W> {
+impl<W: Write + ?Sized> Counting<'_, W> {
     pub fn put(&mut self, b: &[u8]) -> Result<()> {
         self.inner.write_all(b)?;
         self.n += b.len() as u64;

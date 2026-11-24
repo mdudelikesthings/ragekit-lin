@@ -221,7 +221,7 @@ pub fn parse_img(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
 }
 
 /// Write an unencrypted RPF2 archive.
-pub(crate) fn write_rpf2<W: Write>(tree: &Tree, w: &mut W) -> Result<u64> {
+pub(crate) fn write_rpf2<W: Write + ?Sized>(tree: &Tree, w: &mut W) -> Result<u64> {
     let flat = tree.flatten();
     let mut names: Vec<u8> = Vec::new();
     let mut name_off = Vec::with_capacity(flat.len());
@@ -315,7 +315,7 @@ pub(crate) fn write_rpf2<W: Write>(tree: &Tree, w: &mut W) -> Result<u64> {
 }
 
 /// Write an unencrypted IMG3 archive.
-pub(crate) fn write_img<W: Write>(tree: &Tree, w: &mut W) -> Result<u64> {
+pub(crate) fn write_img<W: Write + ?Sized>(tree: &Tree, w: &mut W) -> Result<u64> {
     let mut files: Vec<(&String, &FileData)> = Vec::new();
     for (name, node) in tree.root.children.values() {
         match node {

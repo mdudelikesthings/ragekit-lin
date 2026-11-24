@@ -9,9 +9,11 @@
 pub mod archive;
 pub mod blob;
 pub mod crypto;
+pub mod fsutil;
 pub mod gta4;
 mod key_hashes;
 pub mod keys;
+pub mod oiv;
 pub mod resource;
 mod rpf7_write;
 pub mod tree;

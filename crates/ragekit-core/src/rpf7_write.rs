@@ -9,7 +9,7 @@ use crate::resource;
 use crate::tree::{Counting, FileData, RpfData, Tree};
 use crate::{Error, Result};
 
-pub(crate) fn write<W: Write>(tree: &Tree, w: &mut W, enc: Encryption) -> Result<u64> {
+pub(crate) fn write<W: Write + ?Sized>(tree: &Tree, w: &mut W, enc: Encryption) -> Result<u64> {
     if enc == Encryption::Ng {
         return Err(Error::Invalid("writing NG-encrypted archives is not supported; use OPEN".into()));
     }

@@ -3,6 +3,7 @@
 
 mod cli;
 mod gui;
+mod gui_oiv;
 mod ops;
 
 use clap::Parser;

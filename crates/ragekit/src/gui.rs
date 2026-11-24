@@ -14,6 +14,7 @@ use ragekit_core::tree::node_from_disk;
 use ragekit_core::vfs::{self, Game, Hit};
 use ragekit_core::{Keys, RowKind, Tree};
 
+use crate::gui_oiv::{installed_window, PkgAction, PkgUi, Stage};
 use crate::ops::{self, human, join};
 
 pub fn run(keys_dir: PathBuf, start: Option<PathBuf>) -> Result<()> {
@@ -94,6 +95,8 @@ enum JobDone {
     Msg(String),
     Saved { disk: PathBuf, msg: String },
     Keys { keys: Keys, msg: String },
+    Plan(Box<ragekit_core::oiv::Plan>),
+    Installed(String),
 }
 
 struct Job {
@@ -118,6 +121,7 @@ enum Dialog {
     ConfirmDelete { paths: Vec<String> },
     ModsCopy { archive: PathBuf, mods_target: PathBuf },
     ConfirmQuit,
+    ForceUninstall { id: String, body: String },
     Message { title: String, body: String },
 }
 
@@ -143,10 +147,14 @@ struct App {
     search: Option<Search>,
     search_text: String,
     keys_window: bool,
+    pkg_ui: Option<PkgUi>,
+    installs_window: bool,
+    pending_uninstall: Option<String>,
     dialog: Dialog,
     status: String,
     allow_quit: bool,
     sync_tree: bool,
+    ctx: egui::Context,
 }
 
 impl App {
@@ -176,13 +184,24 @@ impl App {
             search: None,
             search_text: String::new(),
             keys_window: false,
+            pkg_ui: None,
+            installs_window: false,
+            pending_uninstall: None,
             dialog: Dialog::None,
             status: "Open a game folder or an archive to start.".into(),
             allow_quit: false,
             sync_tree: true,
+            ctx: cc.egui_ctx.clone(),
         };
-        let start = start.or_else(|| load_last_root()).unwrap_or(home);
-        app.open_path(&start);
+        let is_pkg = start.as_ref().is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv")));
+        if is_pkg {
+            // Show the game folder behind the install dialog.
+            app.open_path(&ops::load_last_root().unwrap_or(home));
+            app.open_package(start.as_ref().unwrap());
+        } else {
+            let start = start.or_else(|| ops::load_last_root()).unwrap_or(home);
+            app.open_path(&start);
+        }
         app
     }
 
@@ -192,6 +211,10 @@ impl App {
         let p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
         if !p.exists() {
             self.status = format!("{} not found", p.display());
+            return;
+        }
+        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv")) {
+            self.open_package(&p);
             return;
         }
         // Use the game folder above this path as the root, if there is one.
@@ -219,7 +242,7 @@ impl App {
             None => format!("Opened {}", p.display()),
         };
         if self.game.is_some() {
-            save_last_root(p);
+            ops::save_last_root(p);
         }
     }
 
@@ -372,6 +395,95 @@ impl App {
         self.opened.values().filter(|o| o.dirty).count()
     }
 
+    // ---- packages -----------------------------------------------------
+
+    fn open_package(&mut self, p: &Path) {
+        match ragekit_core::oiv::Package::open(p) {
+            Ok(pkg) => self.pkg_ui = Some(PkgUi::new(&self.ctx, pkg)),
+            Err(e) => self.error("Package", &format!("{}: {e}", p.display())),
+        }
+    }
+
+    /// Drop cached listings and clean archives after files changed on disk.
+    fn refresh_all(&mut self) {
+        self.opened.retain(|_, o| o.dirty);
+        self.cache.clear();
+        self.preview = None;
+        self.preview_for = None;
+    }
+
+    fn game_target(&self) -> Option<(PathBuf, Game)> {
+        let r = self.root.as_ref()?;
+        vfs::detect_game(r).map(|(g, _)| (r.clone(), g))
+    }
+
+    fn packages_ui(&mut self, ctx: &egui::Context) {
+        let game = self.game_target();
+        let action = match &mut self.pkg_ui {
+            Some(p) => p.show(ctx, game.clone()),
+            None => PkgAction::None,
+        };
+        match action {
+            PkgAction::None => {}
+            PkgAction::Close => self.pkg_ui = None,
+            PkgAction::OpenGameFolder => {
+                if let Some(p) = rfd::FileDialog::new().set_title("Open game folder").pick_folder() {
+                    self.set_root(&p);
+                    self.go(Loc::disk(p));
+                }
+            }
+            PkgAction::Plan { pkg, opts } => {
+                if let Some(p) = &mut self.pkg_ui {
+                    p.stage = Stage::Planning;
+                }
+                let keys = self.keys.clone();
+                self.start_job("Checking package", move |_| Ok(JobDone::Plan(Box::new(ragekit_core::oiv::plan(&pkg, &opts, keys)))));
+            }
+            PkgAction::Commit { pkg, plan, allow_errors } => {
+                if self.dirty_count() > 0 {
+                    // Don't let unsaved edits and the install fight over the same files.
+                    if let Some(p) = &mut self.pkg_ui {
+                        p.stage = Stage::Planned(plan);
+                    }
+                    self.error("Install", "Save or discard your unsaved archive edits first.");
+                    return;
+                }
+                self.start_job("Installing", move |prog| {
+                    let rec = plan.commit(&pkg, allow_errors, &mut |f| *prog.lock().unwrap() = f.to_string())?;
+                    Ok(JobDone::Installed(format!("Installed \"{}\" ({} file(s) changed). You can undo it under Packages > Installed packages.", rec.package_name, rec.files.len())))
+                });
+            }
+        }
+
+        let root = self.game_target().map(|g| g.0);
+        if self.installs_window {
+            let mut open = true;
+            if let Some((id, force)) = installed_window(ctx, &mut open, root.as_deref()) {
+                self.uninstall(id, force);
+            }
+            self.installs_window = open;
+        }
+    }
+
+    fn uninstall(&mut self, id: String, force: bool) {
+        let Some((game, _)) = self.game_target() else { return };
+        if self.dirty_count() > 0 {
+            self.error("Uninstall", "Save or discard your unsaved archive edits first.");
+            return;
+        }
+        // Release our maps of files that are about to be replaced.
+        self.refresh_all();
+        self.pending_uninstall = None;
+        let id2 = id.clone();
+        self.start_job("Uninstalling", move |_| match ragekit_core::oiv::uninstall(&game, &id2, force) {
+            Ok(log) => Ok(JobDone::Installed(format!("Uninstalled: {} file(s) put back as they were", log.len()))),
+            Err(e) => Err(anyhow!("{e}")),
+        });
+        if !force {
+            self.pending_uninstall = Some(id);
+        }
+    }
+
     // ---- preview ------------------------------------------------------
 
     fn update_preview(&mut self) {
@@ -448,7 +560,21 @@ impl App {
         self.job = None;
         match res {
             Err(_) => self.error(&label, "the task crashed"),
-            Ok(Err(e)) => self.error(&label, &format!("{e:#}")),
+            Ok(Err(e)) => {
+                if let Some(p) = &mut self.pkg_ui {
+                    if matches!(p.stage, Stage::Planning | Stage::Installing) {
+                        p.stage = Stage::Review;
+                    }
+                }
+                self.refresh_all();
+                if label == "Uninstalling" {
+                    if let Some(id) = self.pending_uninstall.take() {
+                        self.dialog = Dialog::ForceUninstall { id, body: format!("{e:#}") };
+                        return;
+                    }
+                }
+                self.error(&label, &format!("{e:#}"))
+            }
             Ok(Ok(JobDone::Msg(m))) => self.status = m,
             Ok(Ok(JobDone::Saved { disk, msg })) => {
                 self.opened.remove(&disk);
@@ -458,6 +584,18 @@ impl App {
             Ok(Ok(JobDone::Keys { keys, msg })) => {
                 self.reload_keys(keys);
                 self.dialog = Dialog::Message { title: "Keys".into(), body: msg };
+            }
+            Ok(Ok(JobDone::Plan(plan))) => {
+                if let Some(p) = &mut self.pkg_ui {
+                    p.stage = Stage::Planned(plan);
+                }
+            }
+            Ok(Ok(JobDone::Installed(msg))) => {
+                self.refresh_all();
+                self.status = msg.clone();
+                if let Some(p) = &mut self.pkg_ui {
+                    p.stage = Stage::Done(msg);
+                }
             }
         }
     }
@@ -641,20 +779,6 @@ fn hexdump(d: &[u8]) -> String {
     s
 }
 
-fn state_file() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("ragekit").join("last_game_folder"))
-}
-fn load_last_root() -> Option<PathBuf> {
-    let p = PathBuf::from(fs::read_to_string(state_file()?).ok()?.trim());
-    p.is_dir().then_some(p)
-}
-fn save_last_root(p: &Path) {
-    if let Some(f) = state_file() {
-        let _ = fs::create_dir_all(f.parent().unwrap());
-        let _ = fs::write(f, p.display().to_string());
-    }
-}
-
 /// Draw a small icon for a row kind and return the label response space.
 fn paint_icon(ui: &mut egui::Ui, kind: RowKind) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 14.0), egui::Sense::hover());
@@ -700,6 +824,11 @@ impl eframe::App for App {
 
         // Drag and drop into an archive in edit mode.
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+        let (pkgs, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv")));
+        if let Some(p) = pkgs.first() {
+            self.open_package(p);
+        }
         if !dropped.is_empty() {
             if self.edit_mode && self.loc.inner.is_some() {
                 self.add_paths(dropped, None);
@@ -746,6 +875,7 @@ impl eframe::App for App {
         self.preview_panel(root);
         self.center(root);
         self.keys_ui(ctx);
+        self.packages_ui(ctx);
         self.dialogs(ctx);
     }
 }
@@ -766,6 +896,18 @@ impl App {
                     }
                 }
                 ui.separator();
+                ui.menu_button("Packages", |ui| {
+                    if ui.button("Install package (.oiv)…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("OpenIV package", &["oiv"]).pick_file() {
+                            self.open_package(&p);
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Installed packages…").clicked() {
+                        self.installs_window = true;
+                        ui.close();
+                    }
+                });
                 let keys_label = if self.keys.has_ng() || self.keys.has_iv() { "Keys" } else { "Keys (setup needed)" };
                 if ui.button(keys_label).clicked() {
                     self.keys_window = true;
@@ -1419,6 +1561,22 @@ impl App {
                         }
                         if ui.button("Edit the original").clicked() {
                             action = Some(Box::new(|a: &mut App| a.edit_mode = true));
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            }
+            Dialog::ForceUninstall { id, body } => {
+                modal("Can't uninstall cleanly").show(ctx, |ui| {
+                    ui.set_max_width(520.0);
+                    ui.label(body.as_str());
+                    ui.horizontal(|ui| {
+                        if ui.button("Uninstall anyway").clicked() {
+                            let id = id.clone();
+                            action = Some(Box::new(move |a: &mut App| a.uninstall(id, true)));
                             close = true;
                         }
                         if ui.button("Cancel").clicked() {

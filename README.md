@@ -12,6 +12,7 @@ A native Linux modding tool for **GTA V** and **GTA IV / Episodes from Liberty C
 | Browse, search, preview, extract | ✓ | ✓ |
 | Add, replace, rename, delete, new folder | ✓ (written as OpenIV-style OPEN archives) | ✓ (written unencrypted, which the game accepts) |
 | Resources | RSC7 (`.ytd`, `.ydr`, `.yft`, `.ymap`…) | RSC5 (`.wtd`, `.wdr`, `.wft`…) |
+| `.oiv` packages | ✓ install into `mods/` (or the game), uninstall | ✓ install in place with backups, uninstall |
 
 Exported files use the same form as OpenIV, CodeWalker and SparkIV, so files move freely between them.
 
@@ -28,6 +29,29 @@ Exported files use the same form as OpenIV, CodeWalker and SparkIV, so files mov
   - For GTA V, ragekit offers to copy the archive into `mods/` before you edit it, so the original game files stay untouched.
 
 ![GTA IV edit mode](docs/edit-mode-gta4.png)
+
+### Packages (.oiv)
+
+Open an `.oiv` with **Packages → Install package**, drop it on the window, or run `ragekit gui mod.oiv`.
+
+![Installing a package](docs/oiv-install.png)
+
+1. You see the package's name, author, icon and description, in its own colors, as in OpenIV.
+2. **Check & install** runs the whole package in memory against your game and lists every step, plus the files it will change. **Nothing on disk changes yet.**
+3. **Install** writes the files. If any write fails, everything is rolled back.
+4. **Packages → Installed packages** lists what you've installed. **Uninstall** puts every changed file back exactly as it was. If a later install changed the same files, ragekit asks you to undo that one first.
+
+Supported `assembly.xml` commands:
+- `archive`, including nested archives and `createIfNotExist`
+- `add`, both inside archives and as loose files
+- `delete`
+- `text`: `insert` before/after a line, `replace`, `add` and `delete`, with the `Equal`, `Mask`, `StartWith`, `EndWith` and `Contains` conditions
+- `xml`: `add` with `First`/`Last`/`Before`/`After`, `replace` and `remove`
+- `defragmentation`, accepted but not needed
+
+Running the same package twice doesn't duplicate XML entries or text lines. Packages marked `<gameversion>` are checked against Legacy or Enhanced.
+
+**Not yet:** `pso` edits (binary `.ymt` metadata) and XML edits on binary `.meta` files. These are reported as errors in the check step, and you can still choose to install the rest.
 
 ## Build
 
@@ -75,6 +99,13 @@ ragekit rm  "$G/mods/update/update.rpf" common/data/some.meta
 ragekit mv  "$G/mods/update/update.rpf" common/data/a.meta b.meta
 ragekit pack my_dlc/ -o dlc.rpf                         # GTA V (folders named *.rpf nest)
 
+# Packages
+ragekit oiv info  mod.oiv
+ragekit oiv install mod.oiv --game "$G" --dry-run    # show what would happen
+ragekit oiv install mod.oiv --game "$G"              # GTA V: into mods/ (add --no-mods for the game itself)
+ragekit oiv list --game "$G"
+ragekit oiv uninstall <id> --game "$G"
+
 # GTA IV
 IV=~/.steam/steam/steamapps/common/"Grand Theft Auto IV/GTAIV"
 ragekit ls  "$IV/pc/models/cdimages/vehicles.img" -l
@@ -93,8 +124,9 @@ ragekit pack my_files/ -o common.rpf --format iv        # or: -o x.img for IMG3
 
 1. ~~GTA V archive core + CLI~~
 2. ~~GTA IV archives, file browser, single tool~~
-3. Texture viewer and replacer (`.ytd`/`.wtd` ↔ DDS/PNG)
-4. `.oiv` package installer
+3. ~~`.oiv` package installer~~
+4. Texture viewer and replacer (`.ytd`/`.wtd` ↔ DDS/PNG)
+4b. PSO / binary metadata (`.ymt`, binary `.meta`) for package `pso` edits
 5. Meta editors (`.ymt`, `.ymap`, `.ytyp` ↔ XML) and GTA IV `.ide`/`.ipl`
 6. Model viewer (`.ydr`, `.yft`, `.wdr`, `.wft`)
 7. NG re-encryption and `.ysc` import for GTA V
@@ -108,6 +140,6 @@ ragekit pack my_files/ -o common.rpf --format iv        # or: -o x.img for IMG3
 
 ## Credits
 
-The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
+The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
 
 Not affiliated with Rockstar Games, Take-Two or the OpenIV team.

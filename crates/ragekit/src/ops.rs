@@ -233,3 +233,18 @@ pub fn describe(name: &str) -> &'static str {
         _ => "",
     }
 }
+
+pub fn state_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("ragekit").join("last_game_folder"))
+}
+pub fn load_last_root() -> Option<PathBuf> {
+    let p = PathBuf::from(fs::read_to_string(state_file()?).ok()?.trim());
+    p.is_dir().then_some(p)
+}
+pub fn save_last_root(p: &Path) {
+    if let Some(f) = state_file() {
+        let _ = fs::create_dir_all(f.parent().unwrap());
+        let _ = fs::write(f, p.display().to_string());
+    }
+}
+

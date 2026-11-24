@@ -108,9 +108,48 @@ pub enum Cmd {
         #[arg(long)]
         no_backup: bool,
     },
+    /// Install, list and uninstall OpenIV packages (.oiv)
+    #[command(subcommand)]
+    Oiv(OivCmd),
     /// Search names across a game folder or archive, including inside archives.
     /// PATTERN is case-insensitive and may use * and ?
     Find { root: PathBuf, pattern: String },
+}
+
+#[derive(Subcommand)]
+pub enum OivCmd {
+    /// Show what a package contains and does
+    Info { package: PathBuf },
+    /// Install a package (GTA V: into the mods folder by default)
+    Install {
+        package: PathBuf,
+        /// Game folder (default: the last one opened in ragekit)
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+        /// GTA V: change the game's own files instead of the mods folder
+        #[arg(long)]
+        no_mods: bool,
+        /// Only show what would happen
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        /// Install even if some steps failed (they are skipped)
+        #[arg(long)]
+        force: bool,
+    },
+    /// List installed packages
+    List {
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+    },
+    /// Undo an install (ID from `ragekit oiv list`)
+    Uninstall {
+        id: String,
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+        /// Uninstall even if the files changed since
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -255,6 +294,7 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
             t.rename(path, new_name)?;
             finish(&t, archive, out.as_ref(), *no_backup)
         }
+        Cmd::Oiv(o) => oiv_cmd(o, keys),
         Cmd::Find { root, pattern } => {
             let mut out = std::io::stdout().lock();
             let mut hits = 0usize;
@@ -381,4 +421,101 @@ fn report(r: ragekit_core::keys::SearchReport) {
         r.ng_tables_found,
         if r.iv_aes { "yes" } else { "no" },
     );
+}
+
+fn game_dir(g: &Option<PathBuf>) -> Result<PathBuf> {
+    g.clone()
+        .or_else(ops::load_last_root)
+        .ok_or_else(|| anyhow!("no game folder given; use --game /path/to/game"))
+}
+
+fn print_package(p: &ragekit_core::oiv::Package) {
+    let m = &p.meta;
+    println!("{} {}", m.name, m.version);
+    if !m.author.is_empty() {
+        println!("by {}", m.author);
+    }
+    println!("For:      {}{}", if m.is_gta5() { "GTA V" } else { "GTA IV" }, m.game_version.as_ref().map(|g| format!(" ({g})")).unwrap_or_default());
+    println!("Format:   OIV {}", m.format_version);
+    if !m.description.is_empty() {
+        println!("\n{}\n", m.description.trim());
+    }
+    if !m.license.is_empty() {
+        println!("License: {}\n", m.license.trim());
+    }
+    println!("Steps:");
+    print_ops(&p.ops, 1);
+}
+
+fn print_ops(ops: &[ragekit_core::oiv::Op], depth: usize) {
+    use ragekit_core::oiv::Op;
+    let pad = "  ".repeat(depth);
+    for op in ops {
+        match op {
+            Op::Archive { path, create, children, .. } => {
+                println!("{pad}archive {path}{}", if *create { " (created if missing)" } else { "" });
+                print_ops(children, depth + 1);
+            }
+            Op::Add { source, dest } => println!("{pad}add     {dest}  <- {source}"),
+            Op::Delete { target } => println!("{pad}delete  {target}"),
+            Op::Text { path, edits, .. } => println!("{pad}text    {path} ({} edits)", edits.len()),
+            Op::Xml { path, pso, edits } => println!("{pad}{}     {path} ({} edits)", if *pso { "pso" } else { "xml" }, edits.len()),
+            Op::Defragmentation => println!("{pad}defragment"),
+        }
+    }
+}
+
+fn oiv_cmd(o: &OivCmd, keys: impl Fn() -> Result<Arc<Keys>>) -> Result<()> {
+    use ragekit_core::oiv::{self, Level, Options, Package};
+    match o {
+        OivCmd::Info { package } => {
+            print_package(&Package::open(package)?);
+            Ok(())
+        }
+        OivCmd::Install { package, game, no_mods, dry_run, force } => {
+            let game = game_dir(game)?;
+            let pkg = Package::open(package)?;
+            let plan = oiv::plan(&pkg, &Options { game_dir: game.clone(), use_mods: !no_mods }, keys()?);
+            for l in &plan.log {
+                let tag = match l.level {
+                    Level::Info => "      ",
+                    Level::Warn => "WARN  ",
+                    Level::Error => "ERROR ",
+                };
+                eprintln!("{tag}{}", l.msg);
+            }
+            eprintln!("\n{} error(s), {} warning(s). Files to change:", plan.errors(), plan.warnings());
+            for (f, write) in plan.changes() {
+                eprintln!("  {} {f}", if write { "write " } else { "delete" });
+            }
+            if *dry_run {
+                return Ok(());
+            }
+            if plan.errors() > 0 && !force {
+                bail!("not installed because of the errors above (use --force to skip the failed steps)");
+            }
+            let rec = plan.commit(&pkg, *force, &mut |f| eprintln!("writing {f}"))?;
+            eprintln!("Installed \"{}\" (id {}). Undo with: ragekit oiv uninstall {} --game \"{}\"", rec.package_name, rec.id, rec.id, game.display());
+            Ok(())
+        }
+        OivCmd::List { game } => {
+            let game = game_dir(game)?;
+            let list = oiv::list(&game);
+            if list.is_empty() {
+                println!("No packages installed by ragekit in {}", game.display());
+            }
+            for r in list {
+                println!("{}  {} {}  ({} files, {})", r.id, r.package_name, r.package_version, r.files.len(), r.target);
+            }
+            Ok(())
+        }
+        OivCmd::Uninstall { id, game, force } => {
+            let game = game_dir(game)?;
+            for l in oiv::uninstall(&game, id, *force)? {
+                eprintln!("{l}");
+            }
+            eprintln!("Uninstalled {id}");
+            Ok(())
+        }
+    }
 }

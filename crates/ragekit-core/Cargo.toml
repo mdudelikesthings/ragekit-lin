@@ -12,6 +12,10 @@ flate2 = "1"
 memmap2 = "0.9"
 rayon = "1"
 thiserror = "2"
+zip = { version = "9.8.2", default-features = false, features = ["deflate"] }
+xmltree = { version = "0.12.0", features = ["attribute-order"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 [dev-dependencies]
 rand = "0.8"
