@@ -40,18 +40,19 @@ pub fn safe_name(name: &str) -> Result<&str> {
 }
 
 /// Export `path` (file, folder or nested archive) from `tree` to `dest`.
-/// Nested archives are unpacked into folders when `expand` is set.
 /// Returns (files written, failures).
-pub fn extract(
-    tree: &Tree,
-    path: &str,
-    dest: &Path,
-    expand: bool,
-    progress: &mut dyn FnMut(&str),
-) -> Result<(usize, Vec<String>)> {
+#[derive(Clone, Copy, Default)]
+pub struct ExtractOpts {
+    /// Unpack nested archives into folders.
+    pub expand: bool,
+    /// Also write binary metadata as .xml and .gxt2 as .txt next to the file.
+    pub convert: bool,
+}
+
+pub fn extract_opts(tree: &Tree, path: &str, dest: &Path, o: &ExtractOpts, progress: &mut dyn FnMut(&str)) -> Result<(usize, Vec<String>)> {
     let mut count = 0;
     let mut failed = Vec::new();
-    extract_rec(tree, path, dest, expand, progress, &mut count, &mut failed)?;
+    extract_rec(tree, path, dest, o, progress, &mut count, &mut failed)?;
     Ok((count, failed))
 }
 
@@ -59,36 +60,37 @@ fn extract_rec(
     tree: &Tree,
     path: &str,
     dest: &Path,
-    expand: bool,
+    o: &ExtractOpts,
     progress: &mut dyn FnMut(&str),
     count: &mut usize,
     failed: &mut Vec<String>,
 ) -> Result<()> {
     let kind = tree.kind(path)?;
-    if kind == RowKind::Folder || (kind == RowKind::Archive && expand) {
+    if kind == RowKind::Folder || (kind == RowKind::Archive && o.expand) {
         fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
         let rows = match tree.list(path) {
             Ok(r) => r,
             Err(e) if kind == RowKind::Archive => {
                 failed.push(format!("{path}: {e} (saved as a file instead)"));
                 let _ = fs::remove_dir(dest);
-                return write_file(tree, path, dest, progress, count, failed);
+                return write_file(tree, path, dest, o, progress, count, failed);
             }
             Err(e) => return Err(e.into()),
         };
         for r in rows {
             let child = join(path, &r.name);
-            extract_rec(tree, &child, &dest.join(safe_name(&r.name)?), expand, progress, count, failed)?;
+            extract_rec(tree, &child, &dest.join(safe_name(&r.name)?), o, progress, count, failed)?;
         }
         return Ok(());
     }
-    write_file(tree, path, dest, progress, count, failed)
+    write_file(tree, path, dest, o, progress, count, failed)
 }
 
 fn write_file(
     tree: &Tree,
     path: &str,
     dest: &Path,
+    o: &ExtractOpts,
     progress: &mut dyn FnMut(&str),
     count: &mut usize,
     failed: &mut Vec<String>,
@@ -98,6 +100,13 @@ fn write_file(
         Ok(data) => {
             if let Some(p) = dest.parent() {
                 fs::create_dir_all(p)?;
+            }
+            if o.convert {
+                if let Ok((text, conv)) = ragekit_core::convert::to_text(&data) {
+                    let mut p = dest.as_os_str().to_owned();
+                    p.push(format!(".{}", conv.ext()));
+                    let _ = fs::write(PathBuf::from(p), text);
+                }
             }
             fs::write(dest, data).with_context(|| format!("writing {}", dest.display()))?;
             *count += 1;

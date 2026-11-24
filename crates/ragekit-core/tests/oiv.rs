@@ -214,3 +214,51 @@ fn gta4_install_in_place_and_uninstall() {
     assert_eq!(fs::read(g.join("common/data/handling.dat")).unwrap(), b"ADMIRAL 1500\nBANSHEE 1200\n");
     fs::remove_dir_all(&g).unwrap();
 }
+
+#[test]
+fn addon_vehicle_pack_installs() {
+    use ragekit_core::dlc;
+    let g = gta5_folder("dlc");
+    // dlclist.xml in update.rpf
+    let mut t = vfs::open(&g.join("update/update.rpf"), keys()).unwrap();
+    t.insert_bytes(
+        "common/data/dlclist.xml",
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<SMandatoryPacksData>\n  <Paths>\n    <Item>platform:/dlcPacks/mpBeach/</Item>\n  </Paths>\n</SMandatoryPacksData>\n".to_vec(),
+    )
+    .unwrap();
+    let bytes = t.to_bytes().unwrap();
+    drop(t);
+    fs::write(g.join("update/update.rpf"), bytes).unwrap();
+
+    let src = g.join("mycar_src");
+    fs::create_dir_all(src.join("stream")).unwrap();
+    fs::write(src.join("stream/mycar.yft"), rsc7(b"model")).unwrap();
+    fs::write(src.join("stream/mycar.ytd"), rsc7(b"tex")).unwrap();
+    fs::write(src.join("vehicles.meta"), b"<CVehicleModelInfo__InitDataList><InitDatas/></CVehicleModelInfo__InitDataList>").unwrap();
+    fs::write(src.join("handling.meta"), b"<?xml version=\"1.0\"?><CHandlingDataMgr/>").unwrap();
+    fs::write(src.join("readme.txt"), b"hi").unwrap();
+    let pack = dlc::scan(&src, "My Car").unwrap();
+    assert_eq!(pack.name, "my_car");
+    assert_eq!(pack.stream.len(), 2);
+    assert_eq!(pack.data.len(), 2);
+    assert_eq!(pack.skipped, vec!["readme.txt".to_string()]);
+
+    // As a shareable .oiv, then installed.
+    let oiv_path = g.join("my_car.oiv");
+    dlc::write_oiv(&pack, &oiv_path, keys()).unwrap();
+    let pkg = Package::open(&oiv_path).unwrap();
+    let plan = oiv::plan(&pkg, &Options { game_dir: g.clone(), use_mods: true }, keys());
+    assert_eq!(plan.errors(), 0, "{:?}", plan.log.iter().map(|l| &l.msg).collect::<Vec<_>>());
+    plan.commit(&pkg, false, &mut |_| {}).unwrap();
+
+    let dlcrpf = vfs::open(&g.join("mods/update/x64/dlcpacks/my_car/dlc.rpf"), keys()).unwrap();
+    let content = String::from_utf8(dlcrpf.read("content.xml").unwrap()).unwrap();
+    assert!(content.contains("dlc_my_car:/common/data/handling.meta"));
+    assert!(content.contains("VEHICLE_METADATA_FILE"));
+    assert!(dlcrpf.read("x64/vehicles.rpf/mycar.yft").is_ok());
+    assert!(String::from_utf8(dlcrpf.read("setup2.xml").unwrap()).unwrap().contains("<deviceName>dlc_my_car</deviceName>"));
+    let upd = vfs::open(&g.join("mods/update/update.rpf"), keys()).unwrap();
+    let list = String::from_utf8(upd.read("common/data/dlclist.xml").unwrap()).unwrap();
+    assert!(list.contains("<Item>dlcpacks:/my_car/</Item>"), "{list}");
+    fs::remove_dir_all(&g).unwrap();
+}

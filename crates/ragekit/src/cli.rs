@@ -60,11 +60,14 @@ pub enum Cmd {
         /// Unpack nested .rpf archives into folders
         #[arg(short = 'x', long)]
         expand_rpf: bool,
+        /// Also save binary metadata as .xml and .gxt2 text tables as .txt
+        #[arg(long)]
+        convert: bool,
     },
     /// Print one file to stdout (handy for .meta / .xml / .dat)
     Cat { archive: PathBuf, path: String },
-    /// Show binary metadata (PSO .ymt/.ymf, RSC7 .ytyp/.ymap, RBF) as XML, or
-    /// replace it from an XML file (converted back to the same format)
+    /// Show binary metadata (PSO .ymt/.ymf, RSC7 .ytyp/.ymap, RBF) as XML and
+    /// .gxt2 text tables as text, or replace them from an edited XML/text file
     Xml {
         /// A metadata file on disk, or an archive
         file: PathBuf,
@@ -76,6 +79,30 @@ pub enum Cmd {
         /// Extra names to resolve hashes (comma-separated)
         #[arg(long, value_delimiter = ',')]
         names: Vec<String>,
+        #[arg(long)]
+        no_backup: bool,
+    },
+    /// Texture dictionaries (.ytd): list, export, replace, add, remove
+    Tex {
+        /// A .ytd on disk, or an archive
+        file: PathBuf,
+        /// Path of the .ytd inside the archive
+        path: Option<String>,
+        /// Export every texture into this folder
+        #[arg(long)]
+        export: Option<PathBuf>,
+        /// Export as DDS instead of PNG
+        #[arg(long)]
+        dds: bool,
+        /// Replace a texture: NAME=image.png (or .dds/.jpg/.tga…)
+        #[arg(long, value_name = "NAME=FILE")]
+        replace: Vec<String>,
+        /// Add textures from image files (named after the file)
+        #[arg(long)]
+        add: Vec<PathBuf>,
+        /// Remove textures by name
+        #[arg(long)]
+        remove: Vec<String>,
         #[arg(long)]
         no_backup: bool,
     },
@@ -127,6 +154,31 @@ pub enum Cmd {
     /// Install, list and uninstall OpenIV packages (.oiv)
     #[command(subcommand)]
     Oiv(OivCmd),
+    /// List GTA V / GTA IV installs found on this computer
+    Games,
+    /// Build an add-on vehicle pack from a folder of .yft/.ytd/.meta files
+    Addon {
+        folder: PathBuf,
+        /// Pack name (default: the folder name)
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Save a shareable .oiv package
+        #[arg(long)]
+        oiv: Option<PathBuf>,
+        /// Install into this game folder now (into mods/, uninstallable)
+        #[arg(long)]
+        install: Option<PathBuf>,
+    },
+    /// Jenkins (joaat) hash of names, as the game uses for models and labels
+    Hash {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Check a GTA V folder's mod setup (ASI loader, mods loader, Proton launch options)
+    Setup {
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+    },
     /// Search names across a game folder or archive, including inside archives.
     /// PATTERN is case-insensitive and may use * and ?
     Find { root: PathBuf, pattern: String },
@@ -235,7 +287,7 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
             }
             list(&t, &base, "", *recursive, *long, *nested, &mut out)
         }
-        Cmd::Extract { archive, paths, out, expand_rpf } => {
+        Cmd::Extract { archive, paths, out, expand_rpf, convert } => {
             let t = open(archive, keys()?)?;
             fs::create_dir_all(out)?;
             let targets = if paths.is_empty() { vec![String::new()] } else { paths.clone() };
@@ -243,7 +295,7 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
             for p in targets {
                 let p = normalize_path(&p);
                 let dest = if p.is_empty() { out.clone() } else { out.join(p.rsplit('/').next().unwrap()) };
-                let (c, f) = ops::extract(&t, &p, &dest, *expand_rpf, &mut |_| {})?;
+                let (c, f) = ops::extract_opts(&t, &p, &dest, &ops::ExtractOpts { expand: *expand_rpf, convert: *convert }, &mut |_| {})?;
                 n += c;
                 failed.extend(f);
             }
@@ -271,17 +323,18 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
             } else {
                 (None, fs::read(file)?)
             };
-            if meta::detect(&data).is_none() {
-                bail!("not binary metadata (PSO, RSC7 Meta or RBF)");
-            }
+            let conv = ragekit_core::convert::kind(&data).ok_or_else(|| anyhow!("not binary metadata (PSO, RSC7 Meta, RBF) or a .gxt2 text table"))?;
             match import {
                 None => {
-                    let (x, kind) = meta::to_xml(&data, names)?;
-                    eprintln!("({} file)", kind.label());
+                    let x = match conv {
+                        ragekit_core::convert::Conv::Meta(_) => meta::to_xml(&data, names)?.0,
+                        _ => ragekit_core::convert::to_text(&data)?.0,
+                    };
+                    eprintln!("({} file)", conv.label());
                     std::io::stdout().lock().write_all(x.as_bytes())?;
                 }
                 Some(xml_path) => {
-                    let bytes = meta::from_xml(&fs::read_to_string(xml_path)?, &data)?;
+                    let bytes = ragekit_core::convert::from_text(&fs::read_to_string(xml_path)?, &data)?;
                     if in_archive {
                         let t = tree.as_mut().unwrap();
                         t.insert_bytes(path.as_deref().unwrap(), bytes)?;
@@ -308,6 +361,85 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
                         }
                         eprintln!("Wrote {} ({})", file.display(), human(n));
                     }
+                }
+            }
+            Ok(())
+        }
+        Cmd::Tex { file, path, export, dds, replace, add, remove, no_backup } => {
+            use ragekit_core::textures;
+            let mut tree = None;
+            let data = match path {
+                Some(p) => {
+                    let t = open(file, keys()?)?;
+                    let d = t.read(p)?;
+                    tree = Some(t);
+                    d
+                }
+                None => fs::read(file)?,
+            };
+            let mut dict = textures::load(&data)?;
+            if let Some(dir) = export {
+                fs::create_dir_all(dir)?;
+                let mut n = 0;
+                for t in &dict.textures {
+                    let (bytes, ext) = if *dds { (textures::to_dds(t), "dds") } else {
+                        match textures::to_png(t) {
+                            Ok(b) => (b, "png"),
+                            Err(e) => {
+                                eprintln!("{}: {e} (exporting as DDS instead)", t.name);
+                                (textures::to_dds(t), "dds")
+                            }
+                        }
+                    };
+                    fs::write(dir.join(format!("{}.{ext}", ops::safe_name(&t.name)?)), bytes)?;
+                    n += 1;
+                }
+                eprintln!("Exported {n} textures to {}", dir.display());
+            }
+            let editing = !replace.is_empty() || !add.is_empty() || !remove.is_empty();
+            if editing {
+                for r in replace {
+                    let (name, img) = r.split_once('=').ok_or_else(|| anyhow!("--replace takes NAME=FILE"))?;
+                    dict.replace(name, &fs::read(img)?)?;
+                    eprintln!("replaced {name}");
+                }
+                for a in add {
+                    let name = a.file_stem().ok_or_else(|| anyhow!("bad file {}", a.display()))?.to_string_lossy().to_string();
+                    dict.add(&name, &fs::read(a)?)?;
+                    eprintln!("added    {name}");
+                }
+                for r in remove {
+                    dict.remove(r)?;
+                    eprintln!("removed  {r}");
+                }
+                let bytes = dict.save()?;
+                match (tree.as_mut(), path) {
+                    (Some(t), Some(p)) => {
+                        t.insert_bytes(p, bytes)?;
+                        finish(t, file, None, *no_backup)?;
+                    }
+                    _ => {
+                        if !no_backup {
+                            let mut s = file.as_os_str().to_owned();
+                            s.push(".bak");
+                            let b = PathBuf::from(s);
+                            if !b.exists() {
+                                fs::copy(file, &b)?;
+                                eprintln!("Backup: {}", b.display());
+                            }
+                        }
+                        ops::write_atomic(file, |w| {
+                            w.write_all(&bytes)?;
+                            Ok(bytes.len() as u64)
+                        })?;
+                        eprintln!("Wrote {}", file.display());
+                    }
+                }
+            }
+            if export.is_none() && !editing {
+                println!("{}{}", if dict.enhanced { "Enhanced (gen9) " } else { "" }, "texture dictionary");
+                for t in &dict.textures {
+                    println!("{:<32} {:>5}x{:<5} {:<11} {} mips", t.name, t.width, t.height, textures::format_name(t.format), t.levels);
                 }
             }
             Ok(())
@@ -362,6 +494,78 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
             finish(&t, archive, out.as_ref(), *no_backup)
         }
         Cmd::Oiv(o) => oiv_cmd(o, keys),
+        Cmd::Hash { names } => {
+            for n in names {
+                let h = ragekit_core::crypto::joaat(n);
+                println!("{n:<32} 0x{h:08X}  {h}  {}", h as i32);
+            }
+            Ok(())
+        }
+        Cmd::Addon { folder, name, oiv, install } => {
+            use ragekit_core::dlc;
+            let name = name.clone().unwrap_or_else(|| folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            let pack = dlc::scan(folder, &name)?;
+            eprintln!("Pack \"{}\": {} streamed file(s), {} data file(s)", pack.name, pack.stream.len(), pack.data.len());
+            for (f, _, t) in &pack.data {
+                eprintln!("  {f:<28} {t}");
+            }
+            for s in &pack.skipped {
+                eprintln!("  skipped {s}");
+            }
+            let keys = keys()?;
+            if let Some(out) = oiv {
+                dlc::write_oiv(&pack, out, keys.clone())?;
+                eprintln!("Wrote {}", out.display());
+            }
+            if let Some(game) = install {
+                let tmp = std::env::temp_dir().join(format!("ragekit-addon-{}", std::process::id()));
+                let _ = fs::remove_dir_all(&tmp);
+                dlc::write_package_dir(&pack, &tmp, keys.clone())?;
+                let pkg = ragekit_core::oiv::Package::open(&tmp)?;
+                let plan = ragekit_core::oiv::plan(&pkg, &ragekit_core::oiv::Options { game_dir: game.clone(), use_mods: true }, keys);
+                for l in &plan.log {
+                    eprintln!("  {}", l.msg);
+                }
+                let rec = plan.commit(&pkg, false, &mut |_| {})?;
+                let _ = fs::remove_dir_all(&tmp);
+                eprintln!("Installed (undo with: ragekit oiv uninstall {} --game \"{}\")", rec.id, game.display());
+            }
+            if oiv.is_none() && install.is_none() {
+                eprintln!("Nothing written: add --oiv FILE and/or --install GAME_FOLDER");
+            }
+            Ok(())
+        }
+        Cmd::Games => {
+            let found = ragekit_core::games::find_installs();
+            if found.is_empty() {
+                println!("No installs found in Steam, Heroic or Lutris folders.");
+            }
+            for i in found {
+                println!("{:<32} {}", i.label(), i.path.display());
+            }
+            Ok(())
+        }
+        Cmd::Setup { game } => {
+            let g = game_dir(game)?;
+            let s = ragekit_core::games::check_mod_setup(&g);
+            let f = |o: &Option<String>| o.clone().unwrap_or_else(|| "missing".into());
+            println!("GTA V {} at {}", if s.enhanced { "Enhanced" } else { "Legacy" }, g.display());
+            println!("ASI loader:         {}", f(&s.asi_loader));
+            println!("Mods-folder loader: {}", f(&s.rpf_loader));
+            println!("Script Hook V:      {}", if s.script_hook { "found" } else { "missing" });
+            println!("mods folder:        {}", if s.mods_folder { format!("{} file(s)", s.mods_files) } else { "not created".into() });
+            println!("ASI plugins:        {}", if s.asi_plugins.is_empty() { "none".into() } else { s.asi_plugins.join(", ") });
+            for p in &s.problems {
+                println!("\nPROBLEM: {p}");
+            }
+            if let Some(o) = &s.launch_option {
+                println!("\nSteam launch options for Proton:\n  {o}");
+            }
+            for t in &s.tips {
+                println!("\n- {t}");
+            }
+            Ok(())
+        }
         Cmd::Find { root, pattern } => {
             let mut out = std::io::stdout().lock();
             let mut hits = 0usize;

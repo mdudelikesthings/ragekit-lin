@@ -8,14 +8,19 @@
 
 pub mod archive;
 pub mod blob;
+pub mod convert;
 pub mod crypto;
+pub mod dlc;
 pub mod fsutil;
+pub mod games;
 pub mod gta4;
+pub mod gxt2;
 mod key_hashes;
 pub mod keys;
 pub mod meta;
 pub mod oiv;
 pub mod resource;
+pub mod textures;
 mod rpf7_write;
 pub mod tree;
 pub mod vfs;

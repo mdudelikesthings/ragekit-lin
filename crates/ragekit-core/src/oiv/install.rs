@@ -206,6 +206,12 @@ pub fn plan(pkg: &Package, opts: &Options, keys: Arc<Keys>) -> Plan {
         if p.use_mods { "mods folder" } else { "game folder" },
         game.label()
     ));
+    if p.use_mods {
+        let setup = crate::games::check_mod_setup(&opts.game_dir);
+        if setup.rpf_loader.is_none() {
+            p.info("note: no mods-folder loader (OpenIV.asi, OpenRPF or RageOpenV) is installed; the game won't load files from mods/ until one is");
+        }
+    }
     let mut r = Runner { p, pkg, keys };
     r.run(&pkg.ops, &Ctx::Top);
     r.p

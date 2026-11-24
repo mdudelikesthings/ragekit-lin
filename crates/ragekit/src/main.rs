@@ -4,7 +4,9 @@
 mod cli;
 mod gui;
 mod gui_oiv;
+mod gui_tex;
 mod ops;
+mod settings;
 
 use clap::Parser;
 
