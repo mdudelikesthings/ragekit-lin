@@ -484,6 +484,52 @@ impl App {
         }
     }
 
+    // ---- binary metadata as XML ----------------------------------------
+
+    /// Bytes of a file in the current location (small files only).
+    fn selected_bytes(&mut self, name: &str) -> Option<Vec<u8>> {
+        let rows = self.rows(&self.loc.clone()).ok()?;
+        let row = rows.iter().find(|r| r.name == name)?;
+        if row.kind != RowKind::File || row.size > 64 << 20 {
+            return None;
+        }
+        match self.loc.inner.clone() {
+            None => fs::read(self.loc.disk.join(name)).ok(),
+            Some(i) => {
+                let disk = self.loc.disk.clone();
+                self.tree(&disk).ok()?.tree.read(&join(&i, name)).ok()
+            }
+        }
+    }
+
+    fn export_xml(&mut self, name: &str) {
+        let Some(data) = self.selected_bytes(name) else { return };
+        let xml = match ragekit_core::meta::to_xml(&data, &[]) {
+            Ok((x, _)) => x,
+            Err(e) => return self.error("Export as XML", &e.to_string()),
+        };
+        let Some(dest) = rfd::FileDialog::new().set_file_name(format!("{name}.xml")).add_filter("XML", &["xml"]).save_file() else { return };
+        match fs::write(&dest, xml) {
+            Ok(()) => self.status = format!("Saved {}", dest.display()),
+            Err(e) => self.error("Export as XML", &e.to_string()),
+        }
+    }
+
+    fn import_xml(&mut self, name: &str) {
+        let Some(original) = self.selected_bytes(name) else { return };
+        let Some(src) = rfd::FileDialog::new().set_title(format!("XML to convert into {name}")).add_filter("XML", &["xml", "meta"]).pick_file() else { return };
+        let xml = match fs::read_to_string(&src) {
+            Ok(x) => x,
+            Err(e) => return self.error("Replace from XML", &e.to_string()),
+        };
+        let bytes = match ragekit_core::meta::from_xml(&xml, &original) {
+            Ok(b) => b,
+            Err(e) => return self.error("Replace from XML", &format!("{e:#}")),
+        };
+        let Some(path) = self.loc.inner_child(name) else { return };
+        self.edit(|t| t.insert_bytes(&path, bytes).map(|_| format!("Replaced {name} from {} — remember to Save", src.display())));
+    }
+
     // ---- preview ------------------------------------------------------
 
     fn update_preview(&mut self) {
@@ -525,6 +571,17 @@ impl App {
         self.preview = Some(match data {
             Err(e) => Preview::Error(e),
             Ok(d) => {
+                if let Some(kind) = ragekit_core::meta::detect(&d) {
+                    self.preview = Some(match ragekit_core::meta::to_xml(&d, &[]) {
+                        Ok((x, _)) => {
+                            let truncated = x.len() > 2 << 20;
+                            let text = x.chars().take(2 << 20).collect();
+                            Preview::Text { name: format!("{name}  ({} shown as XML)", kind.label()), text, truncated }
+                        }
+                        Err(e) => Preview::Error(format!("{name}: {} file, but it couldn't be read: {e}", kind.label())),
+                    });
+                    return;
+                }
                 let looks_text = ops::is_text_name(&name) || (!d.is_empty() && d.iter().take(4096).all(|&b| b == b'\n' || b == b'\r' || b == b'\t' || (0x20..0x7F).contains(&b)));
                 if looks_text {
                     let truncated = d.len() > 2 << 20;
@@ -1118,8 +1175,7 @@ impl App {
                         ui.label(RichText::new("Showing the first 2 MB").weak());
                     }
                     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                        let mut t = text.as_str();
-                        ui.add(egui::TextEdit::multiline(&mut t).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).code_editor());
+                        ui.add(egui::Label::new(RichText::new(text.as_str()).monospace().size(12.0)).extend());
                     });
                 }
                 Some(Preview::Hex { name, dump, size }) => {
@@ -1255,6 +1311,15 @@ impl App {
             let sel: Vec<String> = self.selected.iter().cloned().collect();
             if ui.add_enabled(!sel.is_empty(), egui::Button::new("Extract…")).clicked() {
                 self.extract_selected(sel.clone());
+                ui.close();
+            }
+            let is_meta = sel.len() == 1 && self.selected_bytes(&sel[0]).is_some_and(|d| ragekit_core::meta::detect(&d).is_some());
+            if is_meta && ui.button("Export as XML…").clicked() {
+                self.export_xml(&sel[0]);
+                ui.close();
+            }
+            if is_meta && self.edit_mode && ui.button("Replace from XML…").clicked() {
+                self.import_xml(&sel[0]);
                 ui.close();
             }
             if ui.add_enabled(sel.len() == 1, egui::Button::new("Copy path")).clicked() {

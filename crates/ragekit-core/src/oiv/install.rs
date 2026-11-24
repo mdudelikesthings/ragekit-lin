@@ -101,6 +101,51 @@ enum Ctx {
     Arc { key: PathBuf, prefix: String },
 }
 
+/// Names a package's XML edits mention, so hashes in binary files resolve
+/// to the same names the package uses.
+fn names_in(edits: &[super::package::XmlEdit]) -> Vec<String> {
+    use super::package::XmlEdit;
+    use xmltree::XMLNode;
+    let mut out = Vec::new();
+    let mut words = |s: &str| {
+        for w in s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if w.len() > 1 && !w.chars().all(|c| c.is_ascii_digit()) {
+                out.push(w.to_string());
+            }
+        }
+    };
+    fn walk(n: &XMLNode, words: &mut dyn FnMut(&str)) {
+        match n {
+            XMLNode::Element(e) => {
+                words(&e.name);
+                for (k, v) in &e.attributes {
+                    words(k);
+                    words(v);
+                }
+                for c in &e.children {
+                    walk(c, words);
+                }
+            }
+            XMLNode::Text(t) | XMLNode::CData(t) => words(t),
+            _ => {}
+        }
+    }
+    for e in edits {
+        match e {
+            XmlEdit::Add { xpath, nodes, .. } | XmlEdit::Replace { xpath, nodes } => {
+                words(xpath);
+                for n in nodes {
+                    walk(n, &mut words);
+                }
+            }
+            XmlEdit::Remove { xpath } => words(xpath),
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn join(a: &str, b: &str) -> String {
     let b = normalize_path(b);
     if a.is_empty() {
@@ -423,11 +468,19 @@ impl Runner<'_> {
             }
             Op::Xml { path, pso, edits } => {
                 let shown = self.where_(ctx, path);
-                if *pso {
-                    return Err(Error::Invalid(format!("{shown}: PSO (binary metadata) edits aren't supported yet")));
-                }
                 let data = self.read_for_edit(ctx, path)?.ok_or_else(|| Error::NotFound(format!("XML file {shown}")))?;
-                let mut doc = XmlDoc::parse(&data).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
+                // Binary metadata (PSO / RSC7 Meta / RBF) is edited as XML and converted back.
+                let binary = crate::meta::detect(&data);
+                let xml_bytes = match binary {
+                    Some(kind) => {
+                        crate::meta::check_round_trip(&data).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
+                        let (x, _) = crate::meta::to_xml(&data, &names_in(edits)).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
+                        self.p.info(format!("{}     {shown}: reading {} as XML", if *pso { "pso" } else { "xml" }, kind.label()));
+                        x.into_bytes()
+                    }
+                    None => data.clone(),
+                };
+                let mut doc = XmlDoc::parse(&xml_bytes).map_err(|e| Error::Invalid(format!("{shown}: {e}")))?;
                 for e in edits {
                     match doc.apply(e) {
                         Ok(m) => self.p.info(format!("xml     {shown}: {m}")),
@@ -435,6 +488,15 @@ impl Runner<'_> {
                     }
                 }
                 let out = doc.to_bytes()?;
+                let out = match binary {
+                    Some(kind) => {
+                        let b = crate::meta::from_xml(&String::from_utf8_lossy(&out), &data)
+                            .map_err(|e| Error::Invalid(format!("{shown}: converting back to {}: {e}", kind.label())))?;
+                        self.p.info(format!("{}     {shown}: saved as {}", if *pso { "pso" } else { "xml" }, kind.label()));
+                        b
+                    }
+                    None => out,
+                };
                 self.write_edited(ctx, path, out)
             }
             Op::Defragmentation => {

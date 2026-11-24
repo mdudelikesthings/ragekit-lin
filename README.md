@@ -12,6 +12,7 @@ A native Linux modding tool for **GTA V** and **GTA IV / Episodes from Liberty C
 | Browse, search, preview, extract | ✓ | ✓ |
 | Add, replace, rename, delete, new folder | ✓ (written as OpenIV-style OPEN archives) | ✓ (written unencrypted, which the game accepts) |
 | Resources | RSC7 (`.ytd`, `.ydr`, `.yft`, `.ymap`…) | RSC5 (`.wtd`, `.wdr`, `.wft`…) |
+| Binary metadata | PSO (`.ymt`, `.ymf`), RSC7 Meta (`.ytyp`, `.ymap`, ped `.ymt`), RBF: view, export and edit as XML | — |
 | `.oiv` packages | ✓ install into `mods/` (or the game), uninstall | ✓ install in place with backups, uninstall |
 
 Exported files use the same form as OpenIV, CodeWalker and SparkIV, so files move freely between them.
@@ -47,11 +48,18 @@ Supported `assembly.xml` commands:
 - `delete`
 - `text`: `insert` before/after a line, `replace`, `add` and `delete`, with the `Equal`, `Mask`, `StartWith`, `EndWith` and `Contains` conditions
 - `xml`: `add` with `First`/`Last`/`Before`/`After`, `replace` and `remove`
+- `pso`, and `xml` on binary files: the file is converted to XML, edited and converted back to its own format
 - `defragmentation`, accepted but not needed
 
 Running the same package twice doesn't duplicate XML entries or text lines. Packages marked `<gameversion>` are checked against Legacy or Enhanced.
 
-**Not yet:** `pso` edits (binary `.ymt` metadata) and XML edits on binary `.meta` files. These are reported as errors in the check step, and you can still choose to install the rest.
+### Binary metadata
+
+PSO, RSC7 Meta and RBF files show as XML in the preview. In the right-click menu, **Export as XML** saves that XML, and in edit mode **Replace from XML** converts an XML file back into the same binary format. Names come from a built-in table of tens of thousands of game names; hashes with no known name show as `hash_XXXXXXXX`.
+
+Before ragekit changes a binary file, it converts the untouched original to XML and back and checks that nothing changed. If that check fails, ragekit refuses to edit the file rather than risk damaging it. Real `.ymf`, `.ytyp` and `.ymap` files from public mods pass the check, including Enhanced-edition files.
+
+![Binary metadata preview](docs/meta-preview.png)
 
 ## Build
 
@@ -92,6 +100,8 @@ ragekit ls    "$G/update/update.rpf" common/data -l
 ragekit ls    "$G/update/x64/dlcpacks/mpbiker/dlc.rpf" -r -n      # -n: into nested rpfs
 ragekit find  "$G" 'adder*'
 ragekit cat   "$G/update/update.rpf" common/data/handling.meta > handling.meta
+ragekit xml   "$G/x64/levels/gta5/props.rpf" some/file.ytyp > file.xml   # binary metadata as XML
+ragekit xml   my.ymap > my.xml && ragekit xml my.ymap --import my.xml    # edit a loose file
 ragekit extract "$G/x64e.rpf" levels/gta5/vehicles.rpf -o out -x  # -x: unpack nested rpfs
 
 ragekit add "$G/mods/update/update.rpf" handling.meta --to common/data
@@ -125,9 +135,9 @@ ragekit pack my_files/ -o common.rpf --format iv        # or: -o x.img for IMG3
 1. ~~GTA V archive core + CLI~~
 2. ~~GTA IV archives, file browser, single tool~~
 3. ~~`.oiv` package installer~~
-4. Texture viewer and replacer (`.ytd`/`.wtd` ↔ DDS/PNG)
-4b. PSO / binary metadata (`.ymt`, binary `.meta`) for package `pso` edits
-5. Meta editors (`.ymt`, `.ymap`, `.ytyp` ↔ XML) and GTA IV `.ide`/`.ipl`
+4. ~~Binary metadata (PSO, RSC7 Meta, RBF) as XML~~
+5. Texture viewer and replacer (`.ytd`/`.wtd` ↔ DDS/PNG)
+5b. GTA IV `.ide`/`.ipl` editors
 6. Model viewer (`.ydr`, `.yft`, `.wdr`, `.wft`)
 7. NG re-encryption and `.ysc` import for GTA V
 
@@ -140,6 +150,6 @@ ragekit pack my_files/ -o common.rpf --format iv        # or: -o x.img for IMG3
 
 ## Credits
 
-The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
+PSO and RSC7 Meta reading and writing use the public-domain [`rage-formats`](https://github.com/VIRUXE/rage-formats) crate. RBF follows CodeWalker's Rbf.cs (MIT). The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
 
 Not affiliated with Rockstar Games, Take-Two or the OpenIV team.

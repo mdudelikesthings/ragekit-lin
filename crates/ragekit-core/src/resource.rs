@@ -64,6 +64,8 @@ pub fn describe_extension(name: &str) -> Option<&'static str> {
         "rpf" => "Nested archive",
         "meta" | "xml" => "Metadata (XML)",
         "ymt" => "Metadata (binary)",
+        "ymf" => "Map manifest",
+        "pso" => "Metadata (PSO)",
         "gxt2" => "Text table",
         "dat" | "rel" => "Data",
         _ => return None,

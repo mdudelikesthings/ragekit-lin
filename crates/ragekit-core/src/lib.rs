@@ -13,6 +13,7 @@ pub mod fsutil;
 pub mod gta4;
 mod key_hashes;
 pub mod keys;
+pub mod meta;
 pub mod oiv;
 pub mod resource;
 mod rpf7_write;

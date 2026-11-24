@@ -63,6 +63,22 @@ pub enum Cmd {
     },
     /// Print one file to stdout (handy for .meta / .xml / .dat)
     Cat { archive: PathBuf, path: String },
+    /// Show binary metadata (PSO .ymt/.ymf, RSC7 .ytyp/.ymap, RBF) as XML, or
+    /// replace it from an XML file (converted back to the same format)
+    Xml {
+        /// A metadata file on disk, or an archive
+        file: PathBuf,
+        /// Path inside the archive
+        path: Option<String>,
+        /// Convert this XML file back and replace the metadata with it
+        #[arg(long)]
+        import: Option<PathBuf>,
+        /// Extra names to resolve hashes (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        names: Vec<String>,
+        #[arg(long)]
+        no_backup: bool,
+    },
     /// Build a new archive from a folder
     Pack {
         folder: PathBuf,
@@ -243,6 +259,57 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
         Cmd::Cat { archive, path } => {
             let t = open(archive, keys()?)?;
             std::io::stdout().lock().write_all(&t.read(path)?)?;
+            Ok(())
+        }
+        Cmd::Xml { file, path, import, names, no_backup } => {
+            use ragekit_core::meta;
+            let in_archive = path.is_some();
+            let (mut tree, data) = if let Some(p) = path {
+                let t = open(file, keys()?)?;
+                let d = t.read(p)?;
+                (Some(t), d)
+            } else {
+                (None, fs::read(file)?)
+            };
+            if meta::detect(&data).is_none() {
+                bail!("not binary metadata (PSO, RSC7 Meta or RBF)");
+            }
+            match import {
+                None => {
+                    let (x, kind) = meta::to_xml(&data, names)?;
+                    eprintln!("({} file)", kind.label());
+                    std::io::stdout().lock().write_all(x.as_bytes())?;
+                }
+                Some(xml_path) => {
+                    let bytes = meta::from_xml(&fs::read_to_string(xml_path)?, &data)?;
+                    if in_archive {
+                        let t = tree.as_mut().unwrap();
+                        t.insert_bytes(path.as_deref().unwrap(), bytes)?;
+                        finish(t, file, None, *no_backup)?;
+                    } else {
+                        let (n, bak) = {
+                            let mut bak = None;
+                            if !no_backup {
+                                let mut s = file.as_os_str().to_owned();
+                                s.push(".bak");
+                                let b = PathBuf::from(s);
+                                if !b.exists() {
+                                    fs::copy(file, &b)?;
+                                    bak = Some(b);
+                                }
+                            }
+                            (ops::write_atomic(file, |w| {
+                                w.write_all(&bytes)?;
+                                Ok(bytes.len() as u64)
+                            })?, bak)
+                        };
+                        if let Some(b) = bak {
+                            eprintln!("Backup: {}", b.display());
+                        }
+                        eprintln!("Wrote {} ({})", file.display(), human(n));
+                    }
+                }
+            }
             Ok(())
         }
         Cmd::Pack { folder, out, format } => {
