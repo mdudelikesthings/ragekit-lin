@@ -1,6 +1,6 @@
 [package]
-name = "ragekit-rpf"
-description = "Read, extract and build GTA V RPF7 archives"
+name = "ragekit-core"
+description = "GTA V and GTA IV archive formats: RPF7, RPF2/3, IMG3"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

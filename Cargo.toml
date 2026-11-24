@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/ragekit-rpf", "crates/ragekit-cli"]
+members = ["crates/ragekit-core", "crates/ragekit"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/mdudelikesthings/ragekit"
+repository = "https://github.com/mdudelikesthings/ragekit-lin"
 
 [profile.release]
 lto = "thin"

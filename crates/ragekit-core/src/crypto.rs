@@ -28,6 +28,30 @@ pub fn aes_encrypt(data: &mut [u8], key: &[u8; 32]) {
     }
 }
 
+/// GTA IV table-of-contents decryption: AES-256-ECB applied 16 times.
+pub fn iv_decrypt(data: &mut [u8], key: &[u8; 32]) {
+    let cipher = Aes256::new(GenericArray::from_slice(key));
+    let len = data.len() - data.len() % 16;
+    for block in data[..len].chunks_exact_mut(16) {
+        let b = GenericArray::from_mut_slice(block);
+        for _ in 0..16 {
+            cipher.decrypt_block(b);
+        }
+    }
+}
+
+/// Inverse of [`iv_decrypt`].
+pub fn iv_encrypt(data: &mut [u8], key: &[u8; 32]) {
+    let cipher = Aes256::new(GenericArray::from_slice(key));
+    let len = data.len() - data.len() % 16;
+    for block in data[..len].chunks_exact_mut(16) {
+        let b = GenericArray::from_mut_slice(block);
+        for _ in 0..16 {
+            cipher.encrypt_block(b);
+        }
+    }
+}
+
 /// Rockstar's filename hash (uses the 256-byte lookup table from the game).
 pub fn gta5_hash(lut: &[u8; 256], text: &str) -> u32 {
     let mut result: u32 = 0;

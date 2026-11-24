@@ -2,9 +2,9 @@ use std::io::Write;
 use std::sync::Arc;
 
 use rand::{Rng, RngCore, SeedableRng};
-use ragekit_rpf::archive::EntryKind;
-use ragekit_rpf::tree::RpfData;
-use ragekit_rpf::{Archive, Blob, Encryption, FileData, Keys, Node, Tree};
+use ragekit_core::archive::EntryKind;
+use ragekit_core::tree::RpfData;
+use ragekit_core::{Archive, Blob, Encryption, FileData, Format, Keys, Node, Tree};
 
 fn deflate(d: &[u8]) -> Vec<u8> {
     let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
@@ -16,7 +16,7 @@ fn deflate(d: &[u8]) -> Vec<u8> {
 fn fake_resource(body: &[u8]) -> Vec<u8> {
     let sys = (1u32 << 17) | (2 << 28);
     let gfx = 0u32;
-    let mut v = ragekit_rpf::resource::header(sys, gfx).to_vec();
+    let mut v = ragekit_core::resource::header(sys, gfx).to_vec();
     v.extend(deflate(body));
     v
 }
@@ -27,14 +27,14 @@ fn sample_tree(keys: &Arc<Keys>) -> (Tree, Vec<u8>, Vec<u8>) {
     rng.fill_bytes(&mut big);
     let res_body: Vec<u8> = (0..20000u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
 
-    let mut t = Tree::new(keys.clone());
-    t.insert("common/data/handling.meta", FileData::from_bytes("handling.meta", b"<CHandlingDataMgr/>".to_vec()).unwrap()).unwrap();
-    t.insert("x64/textures/adder.ytd", FileData::from_bytes("adder.ytd", fake_resource(&res_body)).unwrap()).unwrap();
-    t.insert("x64/big.bin", FileData::from_bytes("big.bin", big.clone()).unwrap()).unwrap();
-    t.insert("audio/sfx.awc", FileData::from_bytes("sfx.awc", vec![9u8; 1000]).unwrap()).unwrap();
-    t.insert("empty.txt", FileData::from_bytes("empty.txt", Vec::new()).unwrap()).unwrap();
+    let mut t = Tree::new(Format::Rpf7, keys.clone());
+    t.insert("common/data/handling.meta", FileData::from_bytes("handling.meta", b"<CHandlingDataMgr/>".to_vec(), Format::Rpf7).unwrap()).unwrap();
+    t.insert("x64/textures/adder.ytd", FileData::from_bytes("adder.ytd", fake_resource(&res_body), Format::Rpf7).unwrap()).unwrap();
+    t.insert("x64/big.bin", FileData::from_bytes("big.bin", big.clone(), Format::Rpf7).unwrap()).unwrap();
+    t.insert("audio/sfx.awc", FileData::from_bytes("sfx.awc", vec![9u8; 1000], Format::Rpf7).unwrap()).unwrap();
+    t.insert("empty.txt", FileData::from_bytes("empty.txt", Vec::new(), Format::Rpf7).unwrap()).unwrap();
     // Nested archive created by path.
-    t.insert("dlc.rpf/x64/vehicles.meta", FileData::from_bytes("vehicles.meta", b"<vehicles/>".to_vec()).unwrap()).unwrap();
+    t.insert("dlc.rpf/x64/vehicles.meta", FileData::from_bytes("vehicles.meta", b"<vehicles/>".to_vec(), Format::Rpf7).unwrap()).unwrap();
     t.mkdir("emptydir").unwrap();
     (t, big, res_body)
 }
@@ -43,7 +43,7 @@ fn sample_tree(keys: &Arc<Keys>) -> (Tree, Vec<u8>, Vec<u8>) {
 fn write_and_read_back() {
     let keys = Arc::new(Keys::default());
     let (t, big, res_body) = sample_tree(&keys);
-    let bytes = t.to_bytes(Encryption::Open).unwrap();
+    let bytes = t.to_bytes().unwrap();
     assert_eq!(bytes.len() % 512, 0);
 
     let a = Archive::parse(Blob::from_vec(bytes), "test.rpf", &keys).unwrap();
@@ -67,7 +67,7 @@ fn write_and_read_back() {
     assert_eq!(a.resource_decompressed(i, &keys).unwrap(), res_body);
     let exported = a.extract(i, &keys).unwrap();
     assert_eq!(&exported[..4], b"RSC7");
-    assert_eq!(ragekit_rpf::resource::parse_header(&exported).unwrap().0, 0x20);
+    assert_eq!(ragekit_core::resource::parse_header(&exported).unwrap().0, 0x20);
 
     // Nested archive through a path.
     let (inner, j) = a.resolve("dlc.rpf/x64/vehicles.meta", &keys).unwrap();
@@ -90,7 +90,7 @@ fn write_and_read_back() {
 fn edit_existing_archive() {
     let keys = Arc::new(Keys::default());
     let (t, big, _) = sample_tree(&keys);
-    let v1 = t.to_bytes(Encryption::Open).unwrap();
+    let v1 = t.to_bytes().unwrap();
     let a1 = Archive::parse(Blob::from_vec(v1), "test.rpf", &keys).unwrap();
 
     let mut t2 = Tree::from_archive(a1.clone(), keys.clone()).unwrap();
@@ -99,9 +99,9 @@ fn edit_existing_archive() {
         Node::File(FileData::Rpf(RpfData::Raw(b))) => b.bytes().to_vec(),
         other => panic!("expected raw nested rpf, got {other:?}"),
     };
-    t2.insert("common/data/handling.meta", FileData::from_bytes("handling.meta", b"<new/>".to_vec()).unwrap()).unwrap();
+    t2.insert("common/data/handling.meta", FileData::from_bytes("handling.meta", b"<new/>".to_vec(), Format::Rpf7).unwrap()).unwrap();
     t2.remove("audio/sfx.awc").unwrap();
-    let v2 = t2.to_bytes(Encryption::Open).unwrap();
+    let v2 = t2.to_bytes().unwrap();
     let a2 = Archive::parse(Blob::from_vec(v2), "test.rpf", &keys).unwrap();
     assert_eq!(a2.extract(a2.find("common/data/handling.meta").unwrap(), &keys).unwrap(), b"<new/>");
     assert!(a2.find("audio/sfx.awc").is_none());
@@ -111,8 +111,8 @@ fn edit_existing_archive() {
 
     // Edit inside the nested archive.
     let mut t3 = Tree::from_archive(a2, keys.clone()).unwrap();
-    t3.insert("dlc.rpf/x64/carcols.meta", FileData::from_bytes("carcols.meta", b"<carcols/>".to_vec()).unwrap()).unwrap();
-    let a3 = Archive::parse(Blob::from_vec(t3.to_bytes(Encryption::Open).unwrap()), "test.rpf", &keys).unwrap();
+    t3.insert("dlc.rpf/x64/carcols.meta", FileData::from_bytes("carcols.meta", b"<carcols/>".to_vec(), Format::Rpf7).unwrap()).unwrap();
+    let a3 = Archive::parse(Blob::from_vec(t3.to_bytes().unwrap()), "test.rpf", &keys).unwrap();
     let (inner, j) = a3.resolve("dlc.rpf/x64/carcols.meta", &keys).unwrap();
     assert_eq!(inner.extract(j, &keys).unwrap(), b"<carcols/>");
     let (inner, j) = a3.resolve("dlc.rpf/x64/vehicles.meta", &keys).unwrap();
@@ -125,7 +125,8 @@ fn aes_toc() {
     k.aes = Some([0x42; 32]);
     let keys = Arc::new(k);
     let (t, _, _) = sample_tree(&keys);
-    let bytes = t.to_bytes(Encryption::Aes).unwrap();
+    let mut bytes = Vec::new();
+    t.write_rpf7(&mut bytes, Encryption::Aes).unwrap();
     let a = Archive::parse(Blob::from_vec(bytes.clone()), "t.rpf", &keys).unwrap();
     assert_eq!(a.encryption, Encryption::Aes);
     assert!(a.find("x64/textures/adder.ytd").is_some());
@@ -137,7 +138,7 @@ fn aes_toc() {
 fn ng_needs_keys() {
     let keys = Arc::new(Keys::default());
     let (t, _, _) = sample_tree(&keys);
-    let mut bytes = t.to_bytes(Encryption::Open).unwrap();
+    let mut bytes = t.to_bytes().unwrap();
     bytes[12..16].copy_from_slice(&Encryption::Ng.to_u32().to_le_bytes());
     let err = Archive::parse(Blob::from_vec(bytes), "t.rpf", &keys).unwrap_err();
     assert!(err.to_string().contains("missing key"), "{err}");
@@ -149,7 +150,7 @@ fn ng_cipher_round_structure() {
     // round A maps each 4-byte group through tables; check determinism and
     // that a trailing partial block is untouched.
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-    let mut tables: Box<ragekit_rpf::keys::NgTables> =
+    let mut tables: Box<ragekit_core::keys::NgTables> =
         vec![[[0u32; 256]; 16]; 17].into_boxed_slice().try_into().unwrap();
     for r in tables.iter_mut() {
         for p in r.iter_mut() {
@@ -161,8 +162,8 @@ fn ng_cipher_round_structure() {
     let key: [u32; 68] = core::array::from_fn(|_| rng.gen());
     let mut a = vec![3u8; 37];
     let mut b = a.clone();
-    ragekit_rpf::crypto::ng_decrypt(&mut a, &key, &tables);
-    ragekit_rpf::crypto::ng_decrypt(&mut b, &key, &tables);
+    ragekit_core::crypto::ng_decrypt(&mut a, &key, &tables);
+    ragekit_core::crypto::ng_decrypt(&mut b, &key, &tables);
     assert_eq!(a, b);
     assert_eq!(&a[32..], &[3u8; 5]);
     assert_ne!(&a[..16], &[3u8; 16]);
@@ -172,7 +173,7 @@ fn ng_cipher_round_structure() {
 fn hostile_input_does_not_panic() {
     let keys = Arc::new(Keys::default());
     let (t, _, _) = sample_tree(&keys);
-    let good = t.to_bytes(Encryption::Open).unwrap();
+    let good = t.to_bytes().unwrap();
     let mut rng = rand::rngs::StdRng::seed_from_u64(99);
     for n in [0usize, 4, 16, 17, 100, 600, 2000] {
         let _ = Archive::parse(Blob::from_vec(good[..n.min(good.len())].to_vec()), "t.rpf", &keys);
@@ -206,8 +207,8 @@ fn folder_round_trip() {
     std::fs::write(dir.join("x64/readme.txt"), b"hello").unwrap();
     std::fs::write(dir.join("x64/mymod.rpf/data/a.meta"), b"<a/>").unwrap();
     std::fs::write(dir.join("x64/tex.ytd"), fake_resource(b"pixels")).unwrap();
-    let t = Tree::from_dir(&dir, keys.clone()).unwrap();
-    let a = Archive::parse(Blob::from_vec(t.to_bytes(Encryption::Open).unwrap()), "out.rpf", &keys).unwrap();
+    let t = Tree::from_dir(&dir, Format::Rpf7, keys.clone()).unwrap();
+    let a = Archive::parse(Blob::from_vec(t.to_bytes().unwrap()), "out.rpf", &keys).unwrap();
     let (inner, j) = a.resolve("x64/mymod.rpf/data/a.meta", &keys).unwrap();
     assert_eq!(inner.extract(j, &keys).unwrap(), b"<a/>");
     assert_eq!(a.resource_decompressed(a.find("x64/tex.ytd").unwrap(), &keys).unwrap(), b"pixels");

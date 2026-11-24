@@ -1,24 +1,26 @@
-//! ragekit-rpf: read, extract and build GTA V RPF7 archives on any platform.
+//! ragekit-core: GTA V and GTA IV archive formats.
 //!
-//! * [`Archive`] parses an archive (from a file or from bytes, including
-//!   archives nested inside other archives) and extracts entries.
-//! * [`Tree`] is an editable model of an archive. Load one from an
-//!   [`Archive`] or a folder, add/replace/remove files, then write it out
-//!   as an OpenIV-style "OPEN" archive that GTA V mod loaders accept.
-//! * [`Keys`] holds the decryption keys taken from the user's own game.
+//! * [`vfs::open`] opens any supported archive (GTA V RPF7, GTA IV RPF2,
+//!   RPF3 and IMG3) as an editable [`Tree`]: list and read paths (through
+//!   nested archives), add/replace/remove/rename, then write it back.
+//! * [`Archive`] is the low-level GTA V RPF7 reader.
+//! * [`Keys`] holds decryption keys taken from the user's own games.
 
 pub mod archive;
 pub mod blob;
 pub mod crypto;
+pub mod gta4;
 mod key_hashes;
 pub mod keys;
 pub mod resource;
+mod rpf7_write;
 pub mod tree;
+pub mod vfs;
 
 pub use archive::{Archive, Encryption, Entry, EntryKind};
 pub use blob::Blob;
 pub use keys::Keys;
-pub use tree::{FileData, Node, Tree};
+pub use tree::{FileData, Format, Node, Row, RowKind, Tree};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

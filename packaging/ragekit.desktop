@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ragekit
+GenericName=GTA archive editor
+Comment=Browse, extract and edit GTA V and GTA IV archives
+Exec=ragekit gui %f
+Terminal=false
+Categories=Game;Utility;
+MimeType=application/x-rpf;

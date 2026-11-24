@@ -34,13 +34,17 @@ pub const AES_FILE: &str = "gtav_aes_key.dat";
 pub const NG_KEYS_FILE: &str = "gtav_ng_key.dat";
 pub const NG_TABLES_FILE: &str = "gtav_ng_decrypt_tables.dat";
 pub const HASH_LUT_FILE: &str = "gtav_hash_lut.dat";
+pub const IV_AES_FILE: &str = "gtaiv_aes_key.dat";
 
 const NG_KEYS_LEN: usize = 101 * 272;
 const NG_TABLES_LEN: usize = 17 * 16 * 256 * 4;
 
 #[derive(Clone, Default)]
 pub struct Keys {
+    /// GTA V AES key.
     pub aes: Option<[u8; 32]>,
+    /// GTA IV / EFLC AES key.
+    pub iv_aes: Option<[u8; 32]>,
     pub ng_keys: Option<Box<[NgKey; 101]>>,
     pub ng_tables: Option<Box<NgTables>>,
     pub hash_lut: Option<Box<[u8; 256]>>,
@@ -51,6 +55,7 @@ impl std::fmt::Debug for Keys {
         // Never print key material.
         f.debug_struct("Keys")
             .field("aes", &self.aes.is_some())
+            .field("iv_aes", &self.iv_aes.is_some())
             .field("ng_keys", &self.ng_keys.is_some())
             .field("ng_tables", &self.ng_tables.is_some())
             .field("hash_lut", &self.hash_lut.is_some())
@@ -62,12 +67,14 @@ impl std::fmt::Debug for Keys {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SearchReport {
     pub aes: bool,
+    pub iv_aes: bool,
     pub ng_keys_found: usize,
     pub ng_tables_found: usize,
     pub hash_lut: bool,
 }
 
 impl SearchReport {
+    /// Everything needed for GTA V.
     pub fn complete(&self) -> bool {
         self.aes && self.ng_keys_found == 101 && self.ng_tables_found == 272 && self.hash_lut
     }
@@ -76,6 +83,9 @@ impl SearchReport {
 impl Keys {
     pub fn has_aes(&self) -> bool {
         self.aes.is_some()
+    }
+    pub fn has_iv(&self) -> bool {
+        self.iv_aes.is_some()
     }
     pub fn has_ng(&self) -> bool {
         self.ng_keys.is_some() && self.ng_tables.is_some() && self.hash_lut.is_some()
@@ -86,6 +96,9 @@ impl Keys {
         let mut k = Keys::default();
         if let Some(b) = read_opt(&dir.join(AES_FILE))? {
             k.aes = Some(b.as_slice().try_into().map_err(|_| Error::Keys(format!("{AES_FILE} must be 32 bytes")))?);
+        }
+        if let Some(b) = read_opt(&dir.join(IV_AES_FILE))? {
+            k.iv_aes = Some(b.as_slice().try_into().map_err(|_| Error::Keys(format!("{IV_AES_FILE} must be 32 bytes")))?);
         }
         if let Some(b) = read_opt(&dir.join(NG_KEYS_FILE))? {
             k.ng_keys = Some(parse_ng_keys(&b)?);
@@ -106,6 +119,9 @@ impl Keys {
         fs::create_dir_all(dir)?;
         if let Some(a) = &self.aes {
             write_private(&dir.join(AES_FILE), a)?;
+        }
+        if let Some(a) = &self.iv_aes {
+            write_private(&dir.join(IV_AES_FILE), a)?;
         }
         if let Some(k) = &self.ng_keys {
             let mut b = Vec::with_capacity(NG_KEYS_LEN);
@@ -140,6 +156,11 @@ impl Keys {
                 return Err(Error::Keys("AES key does not match the known GTA V key hash".into()));
             }
         }
+        if let Some(a) = &self.iv_aes {
+            if sha1(a) != IV_AES_KEY_HASH {
+                return Err(Error::Keys("GTA IV AES key does not match the known key hash".into()));
+            }
+        }
         if let Some(l) = &self.hash_lut {
             if sha1(&l[..]) != HASH_LUT_HASH {
                 return Err(Error::Keys("hash lookup table does not match the known hash".into()));
@@ -170,6 +191,9 @@ impl Keys {
     pub fn merge(&mut self, other: Keys) {
         if self.aes.is_none() {
             self.aes = other.aes;
+        }
+        if self.iv_aes.is_none() {
+            self.iv_aes = other.iv_aes;
         }
         if self.ng_keys.is_none() {
             self.ng_keys = other.ng_keys;
@@ -267,6 +291,7 @@ impl Keys {
         }
         let mut k = Keys {
             aes: None,
+            iv_aes: None,
             ng_keys: Some(parse_ng_keys(&out[..NG_KEYS_LEN])?),
             ng_tables: Some(parse_ng_tables(&out[NG_KEYS_LEN..NG_KEYS_LEN + NG_TABLES_LEN])?),
             hash_lut: Some(Box::new(out[NG_KEYS_LEN + NG_TABLES_LEN..NG_KEYS_LEN + NG_TABLES_LEN + 256].try_into().unwrap())),
@@ -333,7 +358,7 @@ fn parse_ng_tables(b: &[u8]) -> Result<Box<NgTables>> {
 /// Hash search state. Targets are grouped by the length of data they cover.
 struct Searcher {
     // length -> (hash -> slot)
-    targets: Vec<(usize, HashMap<[u8; 20], usize>)>,
+    targets: Vec<((usize, usize), HashMap<[u8; 20], usize>)>, // (length, alignment)
     found: Vec<Option<Vec<u8>>>, // slot -> bytes
 }
 
@@ -342,25 +367,29 @@ const SLOT_AES: usize = 0;
 const SLOT_LUT: usize = 1;
 const SLOT_NGK: usize = 2;
 const SLOT_NGT: usize = 103;
-const SLOTS: usize = 375;
+const SLOT_IV: usize = 375;
+const SLOTS: usize = 376;
 
 impl Searcher {
     fn new(have: &Keys) -> Self {
-        let mut by_len: HashMap<usize, HashMap<[u8; 20], usize>> = HashMap::new();
+        let mut by_len: HashMap<(usize, usize), HashMap<[u8; 20], usize>> = HashMap::new();
         if have.aes.is_none() {
-            by_len.entry(32).or_default().insert(AES_KEY_HASH, SLOT_AES);
+            by_len.entry((32, 8)).or_default().insert(AES_KEY_HASH, SLOT_AES);
+        }
+        if have.iv_aes.is_none() {
+            by_len.entry((32, 4)).or_default().insert(IV_AES_KEY_HASH, SLOT_IV);
         }
         if have.hash_lut.is_none() {
-            by_len.entry(256).or_default().insert(HASH_LUT_HASH, SLOT_LUT);
+            by_len.entry((256, 8)).or_default().insert(HASH_LUT_HASH, SLOT_LUT);
         }
         if have.ng_keys.is_none() {
             for (i, h) in NG_KEY_HASHES.iter().enumerate() {
-                by_len.entry(272).or_default().insert(*h, SLOT_NGK + i);
+                by_len.entry((272, 8)).or_default().insert(*h, SLOT_NGK + i);
             }
         }
         if have.ng_tables.is_none() {
             for (i, h) in NG_DECRYPT_TABLE_HASHES.iter().enumerate() {
-                by_len.entry(1024).or_default().insert(*h, SLOT_NGT + i);
+                by_len.entry((1024, 8)).or_default().insert(*h, SLOT_NGT + i);
             }
         }
         Searcher { targets: by_len.into_iter().collect(), found: vec![None; SLOTS] }
@@ -372,19 +401,19 @@ impl Searcher {
 
     fn scan(&mut self, data: &[u8], base: u64) {
         // Keep the virtual address alignment consistent across windows.
-        let skip = ((8 - (base % 8)) % 8) as usize;
         let hits: Vec<(usize, Vec<u8>)> = self
             .targets
             .par_iter()
-            .flat_map(|(len, map)| {
-                let len = *len;
+            .flat_map(|((len, align), map)| {
+                let (len, align) = (*len, *align as u64);
+                let skip = ((align - (base % align)) % align) as usize;
                 if data.len() < len + skip {
                     return Vec::new();
                 }
                 let last = data.len() - len;
-                (0..=(last - skip) / 8)
+                (0..=(last - skip) / align as usize)
                     .into_par_iter()
-                    .map(|k| skip + k * 8)
+                    .map(move |k| skip + k * align as usize)
                     .filter_map(|o| {
                         let w = &data[o..o + len];
                         map.get(&sha1(w)).map(|&slot| (slot, w.to_vec()))
@@ -401,6 +430,9 @@ impl Searcher {
         let f = &self.found;
         if let Some(b) = &f[SLOT_AES] {
             keys.aes = Some(b.as_slice().try_into().unwrap());
+        }
+        if let Some(b) = &f[SLOT_IV] {
+            keys.iv_aes = Some(b.as_slice().try_into().unwrap());
         }
         if let Some(b) = &f[SLOT_LUT] {
             keys.hash_lut = Some(Box::new(b.as_slice().try_into().unwrap()));
@@ -423,6 +455,7 @@ impl Searcher {
         }
         SearchReport {
             aes: keys.aes.is_some(),
+            iv_aes: keys.iv_aes.is_some(),
             ng_keys_found: if keys.ng_keys.is_some() { 101 } else { ngk },
             ng_tables_found: if keys.ng_tables.is_some() { 272 } else { ngt },
             hash_lut: keys.hash_lut.is_some(),
