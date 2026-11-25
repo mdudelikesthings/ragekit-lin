@@ -13,13 +13,15 @@ Native Linux OpenIV-style RAGE modding tool. One Rust binary: no args = GUI (egu
 - Installed via ragekit tools: Ultimate ASI Loader (dinput8.dll), Script Hook V 3889.0, RageOpenV v1.0, SHVDN Enhanced v1.1.0.6. Also present: HeapAdjuster, PackfileLimitAdjuster, RAGEPluginHook files, an unrelated 2021 `XInput1_4.dll`.
 - Launch fix found: the Rockstar launcher starts `GTA5_BE.exe`, which exits instantly under Proton ("Game exited before creating a window" in `pfx/drive_c/users/steamuser/Documents/Rockstar Games/Launcher/launcher.log`). Launch options should be `WINEDLLOVERRIDES="dinput8=n,b" %command% -nobattleye`.
 
-## Open issue: GTA V NG keys
-`~/.config/ragekit/keys/` has `gtav_aes_key.dat`, `gtav_ng_key.dat` (27472 bytes = all 101 NG keys) and `gtav_hash_lut.dat`, but **no `gtav_ng_decrypt_tables.dat`** (the 272 NG decrypt tables), so `has_ng()` is false and NG archives won't open.
-Next steps:
-1. `ragekit keys status`, then `ragekit keys extract --exe "<GTA V folder>"` and look at the tables count.
-2. With the game running (launched with `-nobattleye`): `ragekit keys extract --running`. Reading `/proc/<pid>/mem` needs `sudo sysctl kernel.yama.ptrace_scope=0` (Bazzite defaults to 1) or running as root. Check `find_game_pid` finds the Wine process (comm `GTA5.exe`).
-3. Fallback: CodeWalker `magic.dat` via `ragekit keys extract --magic <file>`.
-4. If tables still aren't found in exe/memory for 1.0.3889, inspect `Searcher` in `keys.rs` (table matching by SHA-1 of each 1 KiB table) against the current exe.
+## GTA V NG keys (solved 2026-11-25)
+All four GTA V key files are in `~/.config/ragekit/keys/`, including `gtav_ng_decrypt_tables.dat` (278528 bytes), taken with `ragekit keys extract --running` while the game ran. NG archives (x64a.rpf, update.rpf) open.
+- Root cause: CodeWalker's 272 table hashes have only 84 distinct values. `Searcher` kept one slot per hash, so at most 84 slots could fill and tables never completed. Fixed: each hash maps to every slot it fills.
+- The tables are not in GTA5.exe on disk (packed); they only appear in memory while the game runs. `ptrace_scope` is already 0 on this machine, so no sudo is needed.
+
+## Building on this machine (15 GB RAM)
+A full `cargo build --release` (opt-level 3) runs out of memory on ragekit-core (>12 GB) and the OOM killer takes the Claude app with it. Build in a capped unit at opt-level 1 (peak ~1.6 GB):
+`systemd-run --user --wait --collect -p MemoryMax=8G -E PATH="$HOME/.cargo/bin:/usr/bin" -E CARGO_PROFILE_RELEASE_LTO=false -E CARGO_PROFILE_RELEASE_OPT_LEVEL=1 --working-directory="$PWD" ~/.cargo/bin/cargo build --release -j 2`
+Rust is installed via rustup in `~/.cargo`.
 
 ## Conventions
 - Commit messages end with the Co-Authored-By/Claude-Session lines the harness provides.
