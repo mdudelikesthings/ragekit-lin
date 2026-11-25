@@ -164,6 +164,8 @@ struct App {
     settings: crate::settings::Settings,
     installs: Vec<ragekit_core::games::Install>,
     setup_window: bool,
+    /// (game folder, prefix status, installed?) for the .NET row.
+    dotnet_state: Option<(PathBuf, String, bool)>,
     hash_window: Option<String>,
     addon: Option<AddonUi>,
     sort: (SortCol, bool),
@@ -209,6 +211,7 @@ impl App {
             settings: crate::settings::Settings::load(),
             installs: ragekit_core::games::find_installs(),
             setup_window: false,
+            dotnet_state: None,
             hash_window: None,
             addon: None,
             sort: (SortCol::Name, true),
@@ -552,6 +555,17 @@ impl App {
         let mut install_recommended = false;
         let mut remove: Option<String> = None;
         let mut apply_launch = false;
+        let mut install_dotnet = false;
+        if is_v && self.dotnet_state.as_ref().is_none_or(|(r, _, _)| r != &root) {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let st = match ragekit_core::dotnet::find_prefix(&root, target.steam_app_ids(), &home) {
+                Some(p) if ragekit_core::dotnet::net48_installed(&p.pfx) => ("installed".to_string(), true),
+                Some(_) => ("not installed".to_string(), false),
+                None => ("no Proton prefix yet (start the game once)".to_string(), false),
+            };
+            self.dotnet_state = Some((root.clone(), st.0, st.1));
+        }
+        let dotnet = self.dotnet_state.clone();
         egui::Window::new("Mod setup and tools").open(&mut open).default_width(720.0).anchor(egui::Align2::CENTER_TOP, [0.0, 70.0]).show(ctx, |ui| {
             let found = |n: &Option<String>| match n {
                 Some(n) => RichText::new(n.as_str()).color(Color32::LIGHT_GREEN),
@@ -621,6 +635,20 @@ impl App {
                         }
                         if ui.small_button("Page").on_hover_text(t.page).clicked() {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(t.page));
+                        }
+                    });
+                    ui.end_row();
+                }
+                if let Some((_, state, ok)) = &dotnet {
+                    ui.vertical(|ui| {
+                        ui.set_width(330.0);
+                        ui.label(RichText::new(".NET Framework 4.8 (in the Proton prefix)").strong());
+                        ui.label(RichText::new("Script Hook V .NET crashes without it. Installed with protontricks, or winetricks using the game's Proton; takes 5–15 minutes.").small().weak());
+                    });
+                    ui.label(if *ok { RichText::new(state.as_str()).color(Color32::LIGHT_GREEN) } else { RichText::new(state.as_str()).weak() });
+                    ui.horizontal(|ui| {
+                        if !ok && ui.add_enabled(!busy && !state.starts_with("no Proton"), egui::Button::new("Install .NET 4.8")).clicked() {
+                            install_dotnet = true;
                         }
                     });
                     ui.end_row();
@@ -706,6 +734,25 @@ impl App {
                 Ok(rec) => self.status = format!("Removed {}", rec.name),
                 Err(e) => self.error("Remove", &e.to_string()),
             }
+        } else if install_dotnet {
+            let r = root.clone();
+            self.start_job("Installing .NET 4.8", move |prog| {
+                let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+                let mut log = String::new();
+                let res = ragekit_core::dotnet::install_net48(&r, target.steam_app_ids(), &home, &mut |l| {
+                    *prog.lock().unwrap() = l.chars().take(120).collect();
+                    log.push_str(l);
+                    log.push('\n');
+                });
+                let tail: String = log.lines().rev().take(15).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                Ok(JobDone::Report(
+                    ".NET Framework".into(),
+                    match res {
+                        Ok(m) => m,
+                        Err(e) => format!("{e}\n\nLast output:\n{tail}"),
+                    },
+                ))
+            });
         } else if apply_launch {
             let msg = apply(&root, target);
             self.dialog = Dialog::Message { title: "Steam launch options".into(), body: msg.trim().to_string() };
@@ -1185,7 +1232,10 @@ impl App {
                 self.error(&label, &format!("{e:#}"))
             }
             Ok(Ok(JobDone::Msg(m))) => self.status = m,
-            Ok(Ok(JobDone::Report(title, body))) => self.dialog = Dialog::Message { title, body },
+            Ok(Ok(JobDone::Report(title, body))) => {
+                self.dotnet_state = None;
+                self.dialog = Dialog::Message { title, body };
+            }
             Ok(Ok(JobDone::Saved { disk, msg })) => {
                 self.opened.remove(&disk);
                 self.invalidate(&disk);

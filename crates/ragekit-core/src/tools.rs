@@ -141,7 +141,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "shvdn",
         name: "Script Hook V .NET (Enhanced edition)",
-        about: "Runs C#/.NET script mods from scripts/. Works on Legacy and Enhanced. Needs Script Hook V, and .NET Framework 4.8 in the Proton prefix.",
+        about: "Runs C#/.NET script mods from scripts/. Works on Legacy and Enhanced. Needs Script Hook V and .NET Framework 4.8 in the Proton prefix (install it below).",
         targets: &[Target::GtaVLegacy, Target::GtaVEnhanced],
         source: Source::GitHub { repo: "Chiheb-Bacha/ScriptHookVDotNetEnhanced", assets: &["ScriptHookVDotNet*.zip", "*.zip"] },
         files: &["ScriptHookVDotNet.asi", "ScriptHookVDotNet*.dll", "ScriptHookVDotNet.ini", "MinHook*.dll"],

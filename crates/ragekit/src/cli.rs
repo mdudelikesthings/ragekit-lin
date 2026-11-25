@@ -280,6 +280,12 @@ pub enum ToolsCmd {
         #[arg(short, long)]
         game: Option<PathBuf>,
     },
+    /// Install .NET Framework 4.8 into the game's Proton prefix (needed by
+    /// Script Hook V .NET); uses protontricks, or winetricks with the game's Proton
+    Dotnet {
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+    },
     /// Show (or with --apply, set) the Steam launch options for the
     /// installed loaders
     LaunchOptions {
@@ -956,6 +962,14 @@ fn tools_cmd(cmd: &ToolsCmd) -> Result<()> {
                     Ok((rec, notes)) => {
                         let v = rec.version.map(|v| format!(" {v}")).unwrap_or_default();
                         println!("{}{v} installed ({} files)", rec.name, rec.files.len());
+                        if rec.tool == "shvdn" {
+                            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+                            if let Some(p) = ragekit_core::dotnet::find_prefix(&g, target.steam_app_ids(), &home) {
+                                if !ragekit_core::dotnet::net48_installed(&p.pfx) {
+                                    println!("  .NET Framework 4.8 isn't in the Proton prefix yet; run: ragekit tools dotnet");
+                                }
+                            }
+                        }
                         for n in notes {
                             println!("  {n}");
                         }
@@ -987,6 +1001,18 @@ fn tools_cmd(cmd: &ToolsCmd) -> Result<()> {
             Ok(())
         }
         ToolsCmd::LaunchOptions { game, apply } => launch(&game_dir(game)?, *apply),
+        ToolsCmd::Dotnet { game } => {
+            let g = game_dir(game)?;
+            let target = target_of(&g)?;
+            let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow!("HOME not set"))?;
+            match ragekit_core::dotnet::install_net48(&g, target.steam_app_ids(), &home, &mut |l| eprintln!("{l}")) {
+                Ok(m) => {
+                    println!("{m}");
+                    Ok(())
+                }
+                Err(e) => bail!("{e}"),
+            }
+        }
     }
 }
 

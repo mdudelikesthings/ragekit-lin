@@ -88,6 +88,8 @@ Nothing is bundled with ragekit; each tool is downloaded from its author when yo
 
 Under Proton, Wine uses its own built-in `dinput8.dll` unless told otherwise. After an install, ragekit adds the needed `WINEDLLOVERRIDES="dinput8=n,b" %command%` to the game's **Steam launch options**, keeping any options you already had. Steam must be closed for this, because it rewrites its settings when it exits. The original is kept as `localconfig.vdf.ragekit.bak`. If Steam is running, or you use Lutris or Heroic, the window shows the line to paste yourself.
 
+Script Hook V .NET also needs **.NET Framework 4.8 inside the game's Proton prefix**, or the game crashes when it loads. The **Install .NET 4.8** row (or `ragekit tools dotnet`) finds the prefix (`steamapps/compatdata/<appid>/pfx`) and installs it with protontricks if you have it (native or Flatpak). Otherwise it uses winetricks (downloading it if needed) with the game's own Proton; that route needs `cabextract`. The installers come from Microsoft and take 5–15 minutes. Start the game once first so Steam creates the prefix, and keep it closed while installing. The row shows whether .NET 4.8 is already registered in the prefix.
+
 The same window flags setups that won't work, such as files in `mods/` with no loader, or OpenIV.asi on Enhanced.
 
 ![Mod setup and tools](docs/mod-tools.png)
@@ -209,6 +211,7 @@ ragekit setup --game "$G"                                            # mod setup
 ragekit tools list    --game "$G"                                    # modding tools for this game
 ragekit tools install --game "$G"                                    # recommended set + Steam launch options
 ragekit tools install scripthookv --game "$G" --from ~/Downloads/ScriptHookV_3889.0_1158.13.zip
+ragekit tools dotnet  --game "$G"                                    # .NET 4.8 into the Proton prefix
 ragekit tools remove  rageopenv --game "$G"
 ragekit addon ~/cars/mycar --install "$G"                            # or --oiv mycar.oiv
 ragekit hash adder zentorno
@@ -261,7 +264,6 @@ ragekit pack my_files/ -o mymod.rpf --format mp3
 - RDR RPF6 is read-only and console-only. Compressed files in Xbox 360 dumps use LZX (XCompress), which ragekit can't decompress yet, so those files fail to extract.
 - RDR 2 (RPF8) isn't supported: its archives use Rockstar's TFIT cipher, whose keys can't be taken from the game the same way.
 - Script Hook V only works with the game version it was built for; after a game update, install it again once its author has released a new version.
-- Script Hook V .NET needs .NET Framework 4.8 inside the game's Proton prefix (for example `protontricks 271590 dotnet48`).
 - Use mods in single-player only.
 
 ## Credits

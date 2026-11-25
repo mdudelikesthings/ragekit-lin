@@ -11,6 +11,7 @@ pub mod blob;
 pub mod convert;
 pub mod crypto;
 pub mod dlc;
+pub mod dotnet;
 pub mod fsutil;
 pub mod games;
 pub mod gta4;
