@@ -9,6 +9,10 @@
 //!   yields everything because the executable is unpacked in memory.
 //! * [`Keys::load_codewalker_magic`]: decode CodeWalker's `magic.dat` bundle,
 //!   which needs the AES key first.
+//! * [`Keys::find_by_probe`] for Max Payne 3 and Red Dead Redemption: every
+//!   32-byte window of the executable (or game memory) is tried as the AES
+//!   key against one of the game's own encrypted archives, so no key or key
+//!   hash needs to ship for those games either.
 //! * [`Keys::load_dir`]: key files in the layout used by CodeWalker / GTAUtil
 //!   (`gtav_aes_key.dat`, `gtav_ng_key.dat`, `gtav_ng_decrypt_tables.dat`,
 //!   `gtav_hash_lut.dat`).
@@ -35,6 +39,8 @@ pub const NG_KEYS_FILE: &str = "gtav_ng_key.dat";
 pub const NG_TABLES_FILE: &str = "gtav_ng_decrypt_tables.dat";
 pub const HASH_LUT_FILE: &str = "gtav_hash_lut.dat";
 pub const IV_AES_FILE: &str = "gtaiv_aes_key.dat";
+pub const MP3_AES_FILE: &str = "mp3_aes_key.dat";
+pub const RDR_AES_FILE: &str = "rdr_aes_key.dat";
 
 const NG_KEYS_LEN: usize = 101 * 272;
 const NG_TABLES_LEN: usize = 17 * 16 * 256 * 4;
@@ -45,6 +51,10 @@ pub struct Keys {
     pub aes: Option<[u8; 32]>,
     /// GTA IV / EFLC AES key.
     pub iv_aes: Option<[u8; 32]>,
+    /// Max Payne 3 AES key.
+    pub mp3_aes: Option<[u8; 32]>,
+    /// Red Dead Redemption AES key.
+    pub rdr_aes: Option<[u8; 32]>,
     pub ng_keys: Option<Box<[NgKey; 101]>>,
     pub ng_tables: Option<Box<NgTables>>,
     pub hash_lut: Option<Box<[u8; 256]>>,
@@ -56,6 +66,8 @@ impl std::fmt::Debug for Keys {
         f.debug_struct("Keys")
             .field("aes", &self.aes.is_some())
             .field("iv_aes", &self.iv_aes.is_some())
+            .field("mp3_aes", &self.mp3_aes.is_some())
+            .field("rdr_aes", &self.rdr_aes.is_some())
             .field("ng_keys", &self.ng_keys.is_some())
             .field("ng_tables", &self.ng_tables.is_some())
             .field("hash_lut", &self.hash_lut.is_some())
@@ -100,6 +112,11 @@ impl Keys {
         if let Some(b) = read_opt(&dir.join(IV_AES_FILE))? {
             k.iv_aes = Some(b.as_slice().try_into().map_err(|_| Error::Keys(format!("{IV_AES_FILE} must be 32 bytes")))?);
         }
+        for (file, slot) in [(MP3_AES_FILE, &mut k.mp3_aes), (RDR_AES_FILE, &mut k.rdr_aes)] {
+            if let Some(b) = read_opt(&dir.join(file))? {
+                *slot = Some(b.as_slice().try_into().map_err(|_| Error::Keys(format!("{file} must be 32 bytes")))?);
+            }
+        }
         if let Some(b) = read_opt(&dir.join(NG_KEYS_FILE))? {
             k.ng_keys = Some(parse_ng_keys(&b)?);
         }
@@ -122,6 +139,12 @@ impl Keys {
         }
         if let Some(a) = &self.iv_aes {
             write_private(&dir.join(IV_AES_FILE), a)?;
+        }
+        if let Some(a) = &self.mp3_aes {
+            write_private(&dir.join(MP3_AES_FILE), a)?;
+        }
+        if let Some(a) = &self.rdr_aes {
+            write_private(&dir.join(RDR_AES_FILE), a)?;
         }
         if let Some(k) = &self.ng_keys {
             let mut b = Vec::with_capacity(NG_KEYS_LEN);
@@ -195,6 +218,12 @@ impl Keys {
         if self.iv_aes.is_none() {
             self.iv_aes = other.iv_aes;
         }
+        if self.mp3_aes.is_none() {
+            self.mp3_aes = other.mp3_aes;
+        }
+        if self.rdr_aes.is_none() {
+            self.rdr_aes = other.rdr_aes;
+        }
         if self.ng_keys.is_none() {
             self.ng_keys = other.ng_keys;
         }
@@ -218,53 +247,46 @@ impl Keys {
     /// Needs ptrace permission on the process: same user with
     /// `kernel.yama.ptrace_scope = 0`, or root.
     pub fn search_process(&mut self, pid: u32) -> Result<SearchReport> {
-        use std::os::unix::fs::FileExt;
-        let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
-        let mem = fs::File::open(format!("/proc/{pid}/mem"))?;
         let mut s = Searcher::new(self);
-        let mut readable_any = false;
-        for line in maps.lines() {
-            let mut it = line.split_whitespace();
-            let (Some(range), Some(perms)) = (it.next(), it.next()) else { continue };
-            if !perms.starts_with('r') {
-                continue;
-            }
-            let path = line.split_whitespace().nth(5).unwrap_or("");
-            if path.starts_with("[v") {
-                continue; // [vvar], [vdso], [vsyscall]
-            }
-            let Some((a, b)) = range.split_once('-') else { continue };
-            let (Ok(start), Ok(end)) = (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) else { continue };
-            // Read in 64 MiB windows with overlap so keys spanning a boundary are seen.
-            const WIN: u64 = 64 << 20;
-            const OVERLAP: u64 = 0x400;
-            let mut pos = start;
-            while pos < end {
-                let len = (end - pos).min(WIN + OVERLAP) as usize;
-                let mut buf = vec![0u8; len];
-                match mem.read_at(&mut buf, pos) {
-                    Ok(n) if n > 0 => {
-                        readable_any = true;
-                        buf.truncate(n);
-                        s.scan(&buf, pos);
-                    }
-                    _ => {}
-                }
-                if s.done() {
-                    break;
-                }
-                pos += WIN;
-            }
-            if s.done() {
-                break;
-            }
-        }
-        if !readable_any {
-            return Err(Error::Keys(format!(
-                "could not read memory of process {pid}; run as root or set kernel.yama.ptrace_scope=0"
-            )));
-        }
+        scan_process(pid, &mut |buf, base| {
+            s.scan(buf, base);
+            s.done()
+        })?;
         Ok(s.finish(self))
+    }
+
+    /// Try every 32-byte window of `data` as an AES key and return the first
+    /// one `probe` accepts. Probes come from [`crate::gta4::rpf_key_probe`]
+    /// and [`crate::rdr::key_probe`]. Keys are usually 4-byte aligned, so
+    /// those offsets go first.
+    pub fn find_by_probe(data: &[u8], probe: &(dyn Fn(&[u8; 32]) -> bool + Sync)) -> Option<[u8; 32]> {
+        if data.len() < 32 {
+            return None;
+        }
+        let last = data.len() - 32;
+        let try_at = |o: usize| -> Option<[u8; 32]> {
+            let k: &[u8; 32] = data[o..o + 32].try_into().unwrap();
+            // Skip windows that can't be a random key (padding, tables of
+            // small integers, text) before paying for the AES key schedule.
+            let zeros = k.iter().filter(|&&b| b == 0).count();
+            if zeros > 6 || k[..8] == k[8..16] {
+                return None;
+            }
+            probe(k).then_some(*k)
+        };
+        (0..=last / 4).into_par_iter().find_map_first(|i| try_at(i * 4)).or_else(|| {
+            (0..=last).into_par_iter().filter(|o| o % 4 != 0).find_map_first(try_at)
+        })
+    }
+
+    /// [`Keys::find_by_probe`] over a running process's memory.
+    pub fn find_by_probe_in_process(pid: u32, probe: &(dyn Fn(&[u8; 32]) -> bool + Sync)) -> Result<Option<[u8; 32]>> {
+        let mut found = None;
+        scan_process(pid, &mut |buf, _| {
+            found = Keys::find_by_probe(buf, probe);
+            found.is_some()
+        })?;
+        Ok(found)
     }
 
     /// Decode CodeWalker's `magic.dat` bundle (NG keys, NG tables, hash LUT).
@@ -290,11 +312,10 @@ impl Keys {
             return Err(Error::Keys("magic.dat decoded to too little data".into()));
         }
         let mut k = Keys {
-            aes: None,
-            iv_aes: None,
             ng_keys: Some(parse_ng_keys(&out[..NG_KEYS_LEN])?),
             ng_tables: Some(parse_ng_tables(&out[NG_KEYS_LEN..NG_KEYS_LEN + NG_TABLES_LEN])?),
             hash_lut: Some(Box::new(out[NG_KEYS_LEN + NG_TABLES_LEN..NG_KEYS_LEN + NG_TABLES_LEN + 256].try_into().unwrap())),
+            ..Default::default()
         };
         k.verify()?;
         self.ng_keys = k.ng_keys.take();
@@ -302,6 +323,51 @@ impl Keys {
         self.hash_lut = k.hash_lut.take();
         Ok(())
     }
+}
+
+/// Feed the readable memory of process `pid` to `f` in overlapping windows
+/// until `f` returns true. Needs ptrace permission on the process: same
+/// user with `kernel.yama.ptrace_scope = 0`, or root.
+pub fn scan_process(pid: u32, f: &mut dyn FnMut(&[u8], u64) -> bool) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let mem = fs::File::open(format!("/proc/{pid}/mem"))?;
+    let mut readable_any = false;
+    for line in maps.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(range), Some(perms)) = (it.next(), it.next()) else { continue };
+        if !perms.starts_with('r') {
+            continue;
+        }
+        let path = line.split_whitespace().nth(5).unwrap_or("");
+        if path.starts_with("[v") {
+            continue; // [vvar], [vdso], [vsyscall]
+        }
+        let Some((a, b)) = range.split_once('-') else { continue };
+        let (Ok(start), Ok(end)) = (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) else { continue };
+        // Read in 64 MiB windows with overlap so keys spanning a boundary are seen.
+        const WIN: u64 = 64 << 20;
+        const OVERLAP: u64 = 0x400;
+        let mut pos = start;
+        while pos < end {
+            let len = (end - pos).min(WIN + OVERLAP) as usize;
+            let mut buf = vec![0u8; len];
+            if let Ok(n @ 1..) = mem.read_at(&mut buf, pos) {
+                readable_any = true;
+                buf.truncate(n);
+                if f(&buf, pos) {
+                    return Ok(());
+                }
+            }
+            pos += WIN;
+        }
+    }
+    if !readable_any {
+        return Err(Error::Keys(format!(
+            "could not read memory of process {pid}; run as root or set kernel.yama.ptrace_scope=0"
+        )));
+    }
+    Ok(())
 }
 
 fn sha1(data: &[u8]) -> [u8; 20] {

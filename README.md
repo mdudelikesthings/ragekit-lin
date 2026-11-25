@@ -1,22 +1,24 @@
 # ragekit
 
-A native Linux modding tool for **GTA V** and **GTA IV / Episodes from Liberty City**, in the spirit of OpenIV. It is one program: run `ragekit` to open the browser, or give it a command to use it from the terminal. It's written in Rust and does not use Wine.
+A native Linux modding tool for **GTA V**, **GTA IV / Episodes from Liberty City** and **Max Payne 3** (OpenIV's three games), with read-only support for **Red Dead Redemption** RPF6 archives. It's in the spirit of OpenIV. It is one program: run `ragekit` to open the browser, or give it a command to use it from the terminal. It's written in Rust and does not use Wine.
 
 ![Browser](docs/browser.png)
 
 ## What it does
 
-| | GTA V | GTA IV / EFLC |
-|---|---|---|
-| Archives | `.rpf` (RPF7): none, OPEN, AES and NG encryption; nested archives (DLC packs) | `.rpf` (RPF2), audio `.rpf` (RPF3, read-only), `.img` (IMG3), plain and encrypted |
-| Browse, search, preview, extract | ✓ | ✓ |
-| Add, replace, rename, delete, new folder | ✓ (written as OpenIV-style OPEN archives) | ✓ (written unencrypted, which the game accepts) |
-| Resources | RSC7 (`.ytd`, `.ydr`, `.yft`, `.ymap`…) | RSC5 (`.wtd`, `.wdr`, `.wft`…) |
-| Textures (`.ytd`) | view, export PNG/DDS; replace/add/remove (Legacy; Enhanced is view/export) | — |
-| Text tables (`.gxt2`) | view, export/import as text | — |
-| Add-on vehicles | folder of `.yft`/`.ytd`/`.meta` → installable DLC pack or `.oiv` | — |
-| Binary metadata | PSO (`.ymt`, `.ymf`), RSC7 Meta (`.ytyp`, `.ymap`, ped `.ymt`), RBF: view, export and edit as XML | — |
-| `.oiv` packages | ✓ install into `mods/` (or the game), uninstall | ✓ install in place with backups, uninstall |
+| | GTA V | GTA IV / EFLC | Max Payne 3 |
+|---|---|---|---|
+| Archives | `.rpf` (RPF7): none, OPEN, AES and NG encryption; nested archives (DLC packs) | `.rpf` (RPF2), audio `.rpf` (RPF3, read-only), `.img` (IMG3), plain and encrypted | `.rpf` (RPF4), plain and encrypted |
+| Browse, search, preview, extract | ✓ | ✓ | ✓ |
+| Add, replace, rename, delete, new folder | ✓ (written as OpenIV-style OPEN archives) | ✓ (written unencrypted, which the game accepts) | ✓ (written unencrypted) |
+| Resources | RSC7 (`.ytd`, `.ydr`, `.yft`, `.ymap`…) | RSC5 (`.wtd`, `.wdr`, `.wft`…) | RSC6, kept as is |
+| Textures (`.ytd`) | view, export PNG/DDS; replace/add/remove (Legacy; Enhanced is view/export) | — | — |
+| Text tables (`.gxt2`) | view, export/import as text | — | — |
+| Add-on vehicles | folder of `.yft`/`.ytd`/`.meta` → installable DLC pack or `.oiv` | — | — |
+| Binary metadata | PSO (`.ymt`, `.ymf`), RSC7 Meta (`.ytyp`, `.ymap`, ped `.ymt`), RBF: view, export and edit as XML | — | — |
+| `.oiv` packages | ✓ install into `mods/` (or the game), uninstall | ✓ install in place with backups, uninstall | — (the format doesn't cover it) |
+
+**Red Dead Redemption** `.rpf` (RPF6, from the Xbox 360 / PS3 releases) opens read-only. Names show as hashes unless the archive carries its debug name table.
 
 Exported files use the same form as OpenIV, CodeWalker and SparkIV, so files move freely between them.
 
@@ -119,6 +121,13 @@ sudo ragekit --keys ~/.config/ragekit/keys keys extract --running   # game runni
 ragekit keys extract --magic /path/to/CodeWalker/magic.dat           # CodeWalker's key bundle
 ragekit keys extract --from-dir /path/to/Keys                        # CodeWalker/GTAUtil keys folder
 
+# Max Payne 3: the key is found by trying candidates from the exe against one of
+# the game's own encrypted archives (nothing is shipped, not even a hash):
+ragekit keys extract --exe ~/.steam/steam/steamapps/common/"Max Payne 3/Max Payne 3"
+# If the exe is packed, start the game and scan it instead:
+sudo ragekit --keys ~/.config/ragekit/keys keys extract --running
+# The same works for an encrypted RDR archive:  --exe <dump>/default.xex --archive <some>.rpf
+
 ragekit keys status
 ```
 
@@ -166,6 +175,11 @@ IV=~/.steam/steam/steamapps/common/"Grand Theft Auto IV/GTAIV"
 ragekit ls  "$IV/pc/models/cdimages/vehicles.img" -l
 ragekit add "$IV/pc/models/cdimages/vehicles.img" admiral.wft admiral.wtd
 ragekit pack my_files/ -o common.rpf --format iv        # or: -o x.img for IMG3
+
+# Max Payne 3
+MP3=~/.steam/steam/steamapps/common/"Max Payne 3/Max Payne 3"
+ragekit ls "$MP3/data.rpf" -l
+ragekit pack my_files/ -o mymod.rpf --format mp3
 ```
 
 ## Layout
@@ -191,10 +205,13 @@ ragekit pack my_files/ -o common.rpf --format iv        # or: -o x.img for IMG3
 - **Not yet tested on real game files.** Every format is tested on synthetic archives built to the documented layouts. Please report any archive that fails to open.
 - Edited GTA V archives are saved as OPEN archives, so the game needs a mods-folder loader (OpenIV.asi, OpenRPF or RageOpenV).
 - RPF3 (GTA IV audio) is read-only and shows names as hashes.
+- Max Payne 3 and RDR support follows the documented archive layouts and hasn't been checked against the PC game files yet. Whether Max Payne 3 loads an unencrypted edited archive in place of an encrypted one is untested.
+- RDR RPF6 is read-only and console-only. Compressed files in Xbox 360 dumps use LZX (XCompress), which ragekit can't decompress yet, so those files fail to extract.
+- RDR 2 (RPF8) isn't supported: its archives use Rockstar's TFIT cipher, whose keys can't be taken from the game the same way.
 - Use mods in single-player only.
 
 ## Credits
 
-PSO and RSC7 Meta reading and writing use the public-domain [`rage-formats`](https://github.com/VIRUXE/rage-formats) crate. RBF follows CodeWalker's Rbf.cs (MIT). The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
+PSO and RSC7 Meta reading and writing use the public-domain [`rage-formats`](https://github.com/VIRUXE/rage-formats) crate. RBF follows CodeWalker's Rbf.cs (MIT). The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The RPF4/RPF6 layouts follow RPFTool (twisted89) and the public-domain `rpf-archive` crate (VIRUXE). The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
 
 Not affiliated with Rockstar Games, Take-Two or the OpenIV team.

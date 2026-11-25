@@ -19,6 +19,7 @@ mod key_hashes;
 pub mod keys;
 pub mod meta;
 pub mod oiv;
+pub mod rdr;
 pub mod resource;
 pub mod textures;
 mod rpf7_write;

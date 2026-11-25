@@ -1354,7 +1354,7 @@ impl App {
                         ui.close();
                     }
                 });
-                let keys_label = if self.keys.has_ng() || self.keys.has_iv() { "Keys" } else { "Keys (setup needed)" };
+                let keys_label = if self.keys.has_ng() || self.keys.has_iv() || self.keys.mp3_aes.is_some() { "Keys" } else { "Keys (setup needed)" };
                 if ui.button(keys_label).clicked() {
                     self.keys_window = true;
                 }
@@ -1611,8 +1611,12 @@ impl App {
                 }
             };
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter this folder").desired_width(200.0));
-                ui.label(RichText::new(format!("{} items", rows.len())).weak());
+                // Leave room for the extract buttons and options on the right.
+                let room = ui.available_width() - 560.0;
+                ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(room.clamp(80.0, 200.0)));
+                if room > 150.0 {
+                    ui.label(RichText::new(format!("{} items", rows.len())).weak());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let sel: Vec<String> = self.selected.iter().cloned().collect();
                     if ui.add_enabled(!sel.is_empty(), egui::Button::new("Extract selected…")).clicked() {
@@ -1902,6 +1906,12 @@ impl App {
                 ui.label("GTA IV / EFLC key");
                 ui.label(mark(k.has_iv()));
                 ui.end_row();
+                ui.label("Max Payne 3 key");
+                ui.label(mark(k.mp3_aes.is_some()));
+                ui.end_row();
+                ui.label("Red Dead Redemption key (RPF6)");
+                ui.label(mark(k.rdr_aes.is_some()));
+                ui.end_row();
             });
             ui.add_space(8.0);
             ui.label(RichText::new(format!("Stored in {}", self.keys_dir.display())).weak().small());
@@ -1910,31 +1920,17 @@ impl App {
             let root_exe = self.root.as_ref().and_then(|r| vfs::detect_game(r)).map(|g| g.1);
             if ui.add_enabled(root_exe.is_some(), egui::Button::new("Find keys in the open game's .exe")).clicked() {
                 let exe = root_exe.clone().unwrap();
-                self.keys_job(move |k| {
-                    let rep = k.search_bytes(&fs::read(&exe)?);
-                    Ok(format!(
-                        "Searched {}.\nGTA V AES: {}   GTA IV: {}",
-                        exe.display(),
-                        if rep.aes { "found" } else { "not found" },
-                        if rep.iv_aes { "found" } else { "not found" }
-                    ))
-                });
+                self.keys_job(move |k| Ok(format!("Searched {}.\n{}", exe.display(), ops::find_keys_in_exe(k, &exe)?)));
             }
             if ui.button("Choose a game .exe…").clicked() {
                 if let Some(exe) = rfd::FileDialog::new().add_filter("Game executable", &["exe"]).pick_file() {
-                    self.keys_job(move |k| {
-                        let rep = k.search_bytes(&fs::read(&exe)?);
-                        Ok(format!("GTA V AES: {}   GTA IV: {}", rep.aes, rep.iv_aes))
-                    });
+                    self.keys_job(move |k| ops::find_keys_in_exe(k, &exe));
                 }
             }
-            if ui.button("Scan the running game (GTA V NG keys)").clicked() {
+            if ui.button("Scan the running game (GTA V NG keys, Max Payne 3)").clicked() {
                 match ops::find_game_pid() {
-                    None => self.error("Keys", "No running GTA V found. Start the game, then try again."),
-                    Some(pid) => self.keys_job(move |k| {
-                        let rep = k.search_process(pid)?;
-                        Ok(format!("NG keys {}/101, NG tables {}/272", rep.ng_keys_found, rep.ng_tables_found))
-                    }),
+                    None => self.error("Keys", "No running GTA V or Max Payne 3 found. Start the game, then try again."),
+                    Some(pid) => self.keys_job(move |k| ops::find_keys_in_process(k, pid)),
                 }
             }
             ui.label(

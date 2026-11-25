@@ -182,7 +182,7 @@ pub fn find_game_pid() -> Option<u32> {
         let cmd = fs::read(e.path().join("cmdline")).unwrap_or_default();
         let cmd = String::from_utf8_lossy(&cmd).to_ascii_lowercase();
         let exe = cmd.split('\0').next().unwrap_or("");
-        if ["gta5.exe", "gta5_enhanced.exe", "gtaiv.exe", "eflc.exe"].iter().any(|n| exe.ends_with(n)) {
+        if ["gta5.exe", "gta5_enhanced.exe", "gtaiv.exe", "eflc.exe", "maxpayne3.exe"].iter().any(|n| exe.ends_with(n)) {
             return Some(pid);
         }
     }
@@ -197,7 +197,7 @@ pub fn resolve_exe(p: &Path) -> Result<PathBuf> {
     if let Some((_, exe)) = ragekit_core::vfs::detect_game(p) {
         return Ok(exe);
     }
-    bail!("no GTA5.exe / GTAIV.exe / EFLC.exe found in {}", p.display())
+    bail!("no GTA5.exe / GTAIV.exe / EFLC.exe / MaxPayne3.exe found in {}", p.display())
 }
 
 /// Text-like file extensions shown in the text viewer.
@@ -257,3 +257,72 @@ pub fn save_last_root(p: &Path) {
     }
 }
 
+
+/// The folder a running game was started from, found through the Windows
+/// exe path on its command line (Wine/Proton) or its /proc exe link.
+pub fn process_game_dir(pid: u32) -> Option<PathBuf> {
+    if let Ok(cmd) = fs::read(format!("/proc/{pid}/cmdline")) {
+        for arg in cmd.split(|&b| b == 0) {
+            let a = String::from_utf8_lossy(arg).replace('\\', "/");
+            if !a.to_ascii_lowercase().ends_with(".exe") {
+                continue;
+            }
+            // Z:/home/... is the Unix root under Wine.
+            let unix = match a.get(..2) {
+                Some(d) if d.eq_ignore_ascii_case("z:") => PathBuf::from(&a[2..]),
+                _ => PathBuf::from(&a),
+            };
+            if let Some(dir) = unix.parent().filter(|d| d.is_dir()) {
+                return Some(dir.to_path_buf());
+            }
+            // Relative / drive-C paths: fall back to the working directory.
+            if let Ok(cwd) = fs::read_link(format!("/proc/{pid}/cwd")) {
+                return Some(cwd);
+            }
+        }
+    }
+    fs::read_link(format!("/proc/{pid}/exe")).ok().and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
+/// Search a game executable for every key it can give: GTA V / GTA IV keys
+/// by hash, and Max Payne 3 / RDR keys by testing candidates against an
+/// encrypted archive in the same folder. Returns a one-line summary.
+pub fn find_keys_in_exe(keys: &mut Keys, exe: &Path) -> Result<String> {
+    use ragekit_core::vfs;
+    let data = fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    let mut parts = Vec::new();
+    let mp3 = vfs::detect_game(dir).is_some_and(|(g, _)| g == vfs::Game::MaxPayne3);
+    if !mp3 {
+        let r = keys.search_bytes(&data);
+        parts.push(format!("GTA V AES: {}", if r.aes { "found" } else { "not found" }));
+        parts.push(format!("GTA IV: {}", if r.iv_aes { "found" } else { "not found" }));
+    }
+    if let Some((_, which, probe)) = vfs::find_probe_archive(dir, None) {
+        if which.slot(keys).is_none() {
+            let found = Keys::find_by_probe(&data, &*probe);
+            parts.push(format!("{}: {}", which.label(), if found.is_some() { "found" } else { "not in the file; try the running game" }));
+            if found.is_some() {
+                *which.slot(keys) = found;
+            }
+        }
+    }
+    Ok(parts.join("   "))
+}
+
+/// Scan a running game's memory: probe for the Max Payne 3 / RDR key when
+/// the game folder holds such archives and that key is missing, otherwise
+/// look for the GTA V keys.
+pub fn find_keys_in_process(keys: &mut Keys, pid: u32) -> Result<String> {
+    use ragekit_core::vfs;
+    if let Some((_, which, probe)) = process_game_dir(pid).and_then(|d| vfs::find_probe_archive(&d, None)) {
+        if which.slot(keys).is_none() {
+            let found = Keys::find_by_probe_in_process(pid, &*probe)?;
+            let msg = format!("{} key: {}", which.label(), if found.is_some() { "found" } else { "not found" });
+            *which.slot(keys) = found;
+            return Ok(msg);
+        }
+    }
+    let r = keys.search_process(pid)?;
+    Ok(format!("NG keys {}/101, NG tables {}/272", r.ng_keys_found, r.ng_tables_found))
+}

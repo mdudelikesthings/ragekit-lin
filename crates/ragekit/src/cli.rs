@@ -111,7 +111,8 @@ pub enum Cmd {
         folder: PathBuf,
         #[arg(short, long)]
         out: PathBuf,
-        /// v = GTA V RPF7 (default), iv = GTA IV RPF2, img = GTA IV IMG3.
+        /// v = GTA V RPF7 (default), iv = GTA IV RPF2, img = GTA IV IMG3,
+        /// mp3 = Max Payne 3 RPF4.
         /// Inferred from an .img output name.
         #[arg(short, long)]
         format: Option<String>,
@@ -226,9 +227,13 @@ pub enum KeysCmd {
     Status,
     /// Find keys in your games and save them. Combine sources as needed.
     Extract {
-        /// GTA5.exe / GTAIV.exe / EFLC.exe, or a game folder
+        /// GTA5.exe / GTAIV.exe / EFLC.exe / MaxPayne3.exe, or a game folder
         #[arg(long)]
         exe: Vec<PathBuf>,
+        /// An encrypted archive of the game to test candidate keys against
+        /// (Max Payne 3 / RDR). Found in the game folder if not given.
+        #[arg(long)]
+        archive: Option<PathBuf>,
         /// Scan a running game process (finds all GTA V keys; needs ptrace rights)
         #[arg(long)]
         pid: Option<u32>,
@@ -449,7 +454,8 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
                 Some("v") | Some("gta5") | Some("rpf7") => Format::Rpf7,
                 Some("iv") | Some("gta4") | Some("rpf2") => Format::Rpf2,
                 Some("img") | Some("img3") => Format::Img3,
-                Some(other) => bail!("unknown format '{other}' (use v, iv or img)"),
+                Some("mp3") | Some("rpf4") => Format::Rpf4,
+                Some(other) => bail!("unknown format '{other}' (use v, iv, img or mp3)"),
                 None if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("img")) => Format::Img3,
                 None => Format::Rpf7,
             };
@@ -641,18 +647,54 @@ fn keys_cmd(dir: &std::path::Path, k: &KeysCmd) -> Result<()> {
             println!("GTA V   NG tables:    {}", yes(keys.ng_tables.is_some()));
             println!("GTA V   hash lookup:  {}", yes(keys.hash_lut.is_some()));
             println!("GTA IV  AES key:      {}", yes(keys.iv_aes.is_some()));
+            println!("Max Payne 3 AES key:  {}", yes(keys.mp3_aes.is_some()));
+            println!("RDR     AES key:      {}", yes(keys.rdr_aes.is_some()));
             Ok(())
         }
-        KeysCmd::Extract { exe, pid, running, magic, from_dir } => {
+        KeysCmd::Extract { exe, archive, pid, running, magic, from_dir } => {
             let mut keys = Keys::load_dir(dir).unwrap_or_default();
             if let Some(d) = from_dir {
                 keys.merge(Keys::load_dir(d).with_context(|| format!("importing {}", d.display()))?);
                 eprintln!("Imported keys from {}", d.display());
             }
+            // Max Payne 3 / RDR keys are found by testing candidates against
+            // one of the game's own encrypted archives.
+            let probe_from = |dir: Option<&std::path::Path>| -> Result<Option<(PathBuf, vfs::KeyFor, vfs::KeyProbe)>> {
+                if let Some(a) = archive {
+                    let mut head = vec![0u8; 0x810];
+                    use std::io::Read;
+                    fs::File::open(a)?.read_exact(&mut head).with_context(|| format!("reading {}", a.display()))?;
+                    let (k, p) = vfs::key_probe(&head)
+                        .ok_or_else(|| anyhow!("{} is not an encrypted RPF2/RPF4/RPF6 archive", a.display()))?;
+                    return Ok(Some((a.clone(), k, p)));
+                }
+                Ok(dir.and_then(|d| vfs::find_probe_archive(d, None)))
+            };
+            let mut probe_saved: Option<(PathBuf, vfs::KeyFor, vfs::KeyProbe)> = None;
             for e in exe {
                 let exe = ops::resolve_exe(e)?;
                 eprintln!("Searching {} ...", exe.display());
-                report(keys.search_bytes(&fs::read(&exe)?));
+                let data = fs::read(&exe)?;
+                let mp3 = vfs::detect_game(exe.parent().unwrap_or(std::path::Path::new("."))).is_some_and(|(g, _)| g == vfs::Game::MaxPayne3);
+                if !mp3 {
+                    report(keys.search_bytes(&data));
+                }
+                if let Some((arch, which, probe)) = probe_from(exe.parent())? {
+                    if which != vfs::KeyFor::GtaIV || !keys.has_iv() {
+                        eprintln!("  testing keys against {} ...", arch.display());
+                        match Keys::find_by_probe(&data, &*probe) {
+                            Some(k) => {
+                                *which.slot(&mut keys) = Some(k);
+                                eprintln!("  {} AES key: found", which.label());
+                            }
+                            None => eprintln!(
+                                "  {} AES key: not in the file (it may be packed); start the game and use --running",
+                                which.label()
+                            ),
+                        }
+                    }
+                    probe_saved = Some((arch, which, probe));
+                }
             }
             let pid = match (pid, running) {
                 (Some(p), _) => Some(*p),
@@ -660,8 +702,27 @@ fn keys_cmd(dir: &std::path::Path, k: &KeysCmd) -> Result<()> {
                 _ => None,
             };
             if let Some(p) = pid {
-                eprintln!("Scanning memory of process {p} ...");
-                report(keys.search_process(p)?);
+                if probe_saved.is_none() {
+                    // The game folder is the process's exe folder under Wine/Proton.
+                    let dir = ops::process_game_dir(p);
+                    probe_saved = probe_from(dir.as_deref())?;
+                }
+                match &probe_saved {
+                    Some((_, which, probe)) if which.slot(&mut keys).is_none() => {
+                        eprintln!("Testing memory of process {p} for the {} key ...", which.label());
+                        match Keys::find_by_probe_in_process(p, &**probe)? {
+                            Some(k) => {
+                                *which.slot(&mut keys) = Some(k);
+                                eprintln!("  {} AES key: found", which.label());
+                            }
+                            None => eprintln!("  {} AES key: not found", which.label()),
+                        }
+                    }
+                    _ => {
+                        eprintln!("Scanning memory of process {p} ...");
+                        report(keys.search_process(p)?);
+                    }
+                }
             }
             if let Some(m) = magic {
                 keys.load_codewalker_magic(&fs::read(m)?).context("decoding magic.dat")?;
@@ -670,7 +731,14 @@ fn keys_cmd(dir: &std::path::Path, k: &KeysCmd) -> Result<()> {
             keys.verify()?;
             keys.save_dir(dir)?;
             println!("Saved to {}", dir.display());
-            println!("GTA V: AES {}  NG {}   GTA IV: {}", yes(keys.has_aes()), yes(keys.has_ng()), yes(keys.has_iv()));
+            println!(
+                "GTA V: AES {}  NG {}   GTA IV: {}   Max Payne 3: {}   RDR: {}",
+                yes(keys.has_aes()),
+                yes(keys.has_ng()),
+                yes(keys.has_iv()),
+                yes(keys.mp3_aes.is_some()),
+                yes(keys.rdr_aes.is_some())
+            );
             if keys.has_aes() && !keys.has_ng() {
                 println!(
                     "GTA V NG keys are still missing. Start GTA V and run\n  \

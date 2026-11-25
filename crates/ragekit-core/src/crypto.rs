@@ -40,6 +40,17 @@ pub fn iv_decrypt(data: &mut [u8], key: &[u8; 32]) {
     }
 }
 
+/// [`iv_decrypt`] for one block, with a decrypt-only key schedule (fast
+/// enough to try every offset of an executable as a key).
+pub fn iv_decrypt_block(mut block: [u8; 16], key: &[u8; 32]) -> [u8; 16] {
+    let cipher = aes::Aes256Dec::new(GenericArray::from_slice(key));
+    let b = GenericArray::from_mut_slice(&mut block);
+    for _ in 0..16 {
+        cipher.decrypt_block(b);
+    }
+    block
+}
+
 /// Inverse of [`iv_decrypt`].
 pub fn iv_encrypt(data: &mut [u8], key: &[u8; 32]) {
     let cipher = Aes256::new(GenericArray::from_slice(key));

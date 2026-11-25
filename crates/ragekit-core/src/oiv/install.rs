@@ -175,6 +175,10 @@ pub fn plan(pkg: &Package, opts: &Options, keys: Arc<Keys>) -> Plan {
         return p;
     };
     p.game = Some(game);
+    if !game.takes_oiv() {
+        p.error(format!(".oiv packages are for GTA V and GTA IV; this folder is {}", game.label()));
+        return p;
+    }
     let pkg_v = pkg.meta.is_gta5();
     if pkg_v != (game == Game::GtaV) {
         p.error(format!(

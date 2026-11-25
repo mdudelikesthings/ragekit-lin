@@ -71,12 +71,13 @@ fn probe(dir: &Path, source: &'static str, out: &mut Vec<Install>) {
     }
 }
 
-const GAME_DIRS: [&str; 5] = [
+const GAME_DIRS: [&str; 6] = [
     "Grand Theft Auto V",
     "Grand Theft Auto V Enhanced",
     "Grand Theft Auto IV",
     "Grand Theft Auto IV/GTAIV",
     "Grand Theft Auto Episodes from Liberty City",
+    "Max Payne 3",
 ];
 
 /// Find GTA V / GTA IV installs: Steam libraries (native, Flatpak, Snap),

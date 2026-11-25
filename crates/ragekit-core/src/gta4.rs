@@ -1,4 +1,9 @@
-//! GTA IV / Episodes from Liberty City archives: RPF2, RPF3 (audio) and IMG3.
+//! GTA IV / Episodes from Liberty City archives: RPF2, RPF3 (audio) and IMG3,
+//! and Max Payne 3's RPF4, which shares the RPF2 layout.
+//!
+//! RPF4 differs from RPF2 only in how offsets are stored (in 8-byte units,
+//! with the low byte of the field reserved) and in using Max Payne 3's own
+//! AES key. Compressed files are raw deflate in both.
 //!
 //! Layout facts from the GTAMods wiki and SparkIV's documentation of the
 //! formats; this is an independent implementation.
@@ -21,6 +26,7 @@ use crate::{Error, Result};
 
 pub const RPF2_MAGIC: u32 = 0x3246_5052; // "RPF2"
 pub const RPF3_MAGIC: u32 = 0x3346_5052; // "RPF3"
+pub const RPF4_MAGIC: u32 = 0x3446_5052; // "RPF4"
 pub const IMG3_MAGIC: u32 = 0xA94E_2A52;
 const SECTOR: u64 = 0x800;
 
@@ -36,6 +42,38 @@ fn cstr(b: &[u8], off: usize) -> Option<String> {
 
 fn iv_key(keys: &Keys) -> Result<&[u8; 32]> {
     keys.iv_aes.as_ref().ok_or(Error::MissingKey("GTA IV AES key"))
+}
+
+fn toc_key(keys: &Keys, format: Format) -> Result<&[u8; 32]> {
+    if format == Format::Rpf4 {
+        keys.mp3_aes.as_ref().ok_or(Error::MissingKey("Max Payne 3 AES key"))
+    } else {
+        iv_key(keys)
+    }
+}
+
+/// Does `key` decrypt the first table-of-contents block of an encrypted
+/// RPF2/RPF4 archive into a plausible root folder entry? Used to find keys
+/// in a game executable without shipping them.
+pub fn rpf_key_probe(head: &[u8]) -> Option<impl Fn(&[u8; 32]) -> bool + Sync + Send + use<>> {
+    if head.len() < SECTOR as usize + 16 || !matches!(u32_at(head, 0), RPF2_MAGIC | RPF3_MAGIC | RPF4_MAGIC) || u32_at(head, 16) == 0 {
+        return None;
+    }
+    let count = u32_at(head, 8);
+    let block: [u8; 16] = head[SECTOR as usize..SECTOR as usize + 16].try_into().unwrap();
+    Some(move |key: &[u8; 32]| root_entry_ok(&crate::crypto::iv_decrypt_block(block, key), count, false))
+}
+
+/// Root folder entry check shared by the key probes: the root is a folder
+/// whose children start at entry 1 and number no more than the archive holds.
+pub(crate) fn root_entry_ok(e: &[u8; 16], count: u32, big_endian: bool) -> bool {
+    let rd = |o: usize| {
+        let b: [u8; 4] = e[o..o + 4].try_into().unwrap();
+        if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+    };
+    let (w2, w3) = (rd(8), rd(12));
+    let n = w3 & 0x0FFF_FFFF;
+    w2 == 0x8000_0001 && n >= 1 && n < count && w3 >> 28 == 0
 }
 
 /// Is this an IMG3 archive (plain or encrypted)? Needs the key to tell for
@@ -65,7 +103,8 @@ pub fn parse_rpf(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
     let format = match magic {
         RPF2_MAGIC => Format::Rpf2,
         RPF3_MAGIC => Format::Rpf3,
-        _ => return Err(Error::Malformed("not an RPF2/RPF3 archive".into())),
+        RPF4_MAGIC => Format::Rpf4,
+        _ => return Err(Error::Malformed("not an RPF2/RPF3/RPF4 archive".into())),
     };
     let toc_size = u32_at(b, 4) as usize;
     let count = u32_at(b, 8) as usize;
@@ -78,7 +117,7 @@ pub fn parse_rpf(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
     let toc_end = toc_end.ok_or_else(|| Error::Malformed("table of contents runs past end of file".into()))?;
     let mut toc = b[SECTOR as usize..toc_end].to_vec();
     if encrypted {
-        iv_decrypt(&mut toc, iv_key(&keys)?);
+        iv_decrypt(&mut toc, toc_key(&keys, format)?);
     }
     let names = &toc[count * 16..];
 
@@ -94,7 +133,7 @@ pub fn parse_rpf(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
         let e = &toc[i * 16..i * 16 + 16];
         let (w0, w1, w2, w3) = (u32_at(e, 0), u32_at(e, 4), u32_at(e, 8), u32_at(e, 12));
         let dir = (w2 as i32) < 0;
-        let name = if format == Format::Rpf2 {
+        let name = if format != Format::Rpf3 {
             cstr(names, w0 as usize).ok_or_else(|| Error::Malformed(format!("entry {i}: bad name offset (wrong key?)")))?
         } else if i == 0 {
             String::new()
@@ -129,8 +168,9 @@ pub fn parse_rpf(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
             } else {
                 let size = ce.w1;
                 let is_res = ce.w3 & 0xC000_0000 == 0xC000_0000;
+                let rpf4 = format == Format::Rpf4;
                 if is_res {
-                    let offset = (ce.w2 & 0x7FFF_FF00) as usize;
+                    let offset = (ce.w2 & 0x7FFF_FF00) as usize * if rpf4 { 8 } else { 1 };
                     let blob = data.slice(offset, size as usize).ok_or_else(|| {
                         Error::Malformed(format!("{}: data runs past end of archive", ce.name))
                     })?;
@@ -138,7 +178,7 @@ pub fn parse_rpf(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
                 } else {
                     let stored = (ce.w3 & 0x3FFF_FFFF) as usize;
                     let compressed = ce.w3 & 0x4000_0000 != 0;
-                    let offset = ce.w2 as usize;
+                    let offset = if rpf4 { (ce.w2 & 0x7FFF_FF00) as usize * 8 } else { ce.w2 as usize };
                     let blob = data.slice(offset, stored).ok_or_else(|| {
                         Error::Malformed(format!("{}: data runs past end of archive", ce.name))
                     })?;
@@ -154,7 +194,7 @@ pub fn parse_rpf(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
     let mut tree = Tree::new(format, keys);
     tree.root = root;
     tree.header_extra = unknown;
-    tree.root_name = if format == Format::Rpf2 { ents[0].name.clone() } else { String::new() };
+    tree.root_name = if format != Format::Rpf3 { ents[0].name.clone() } else { String::new() };
     tree.origin = format!("{} · {}", format.label(), if encrypted { "AES" } else { "unencrypted" });
     Ok(tree)
 }
@@ -220,7 +260,7 @@ pub fn parse_img(data: Blob, keys: Arc<Keys>) -> Result<Tree> {
     Ok(tree)
 }
 
-/// Write an unencrypted RPF2 archive.
+/// Write an unencrypted RPF2 (GTA IV) or RPF4 (Max Payne 3) archive.
 pub(crate) fn write_rpf2<W: Write + ?Sized>(tree: &Tree, w: &mut W) -> Result<u64> {
     let flat = tree.flatten();
     let mut names: Vec<u8> = Vec::new();
@@ -244,18 +284,20 @@ pub(crate) fn write_rpf2<W: Write + ?Sized>(tree: &Tree, w: &mut W) -> Result<u6
         Ok(match fd {
             FileData::Binary { stored, .. } => stored.len(),
             FileData::Resource5 { data, .. } => data.len(),
-            FileData::Resource { .. } => return Err(Error::Invalid("GTA V resources can't go in a GTA IV archive".into())),
-            FileData::Rpf(_) => return Err(Error::Invalid("GTA IV archives can't contain nested archives".into())),
+            FileData::Resource { .. } => return Err(Error::Invalid(format!("GTA V resources can't go in a {} archive", tree.format.game()))),
+            FileData::Rpf(_) => return Err(Error::Invalid(format!("{} archives can't contain nested archives", tree.format.game()))),
         })
     };
 
+    let rpf4 = tree.format == Format::Rpf4;
+    let unit: u64 = if rpf4 { 8 } else { 1 };
     let mut next = (SECTOR + toc_size as u64).div_ceil(SECTOR) * SECTOR;
     let mut offsets = vec![0u64; flat.len()];
     for (i, f) in flat.iter().enumerate() {
         if let Some(fd) = f.file {
             offsets[i] = next;
             next += stored_len(fd)?.div_ceil(SECTOR).max(1) * SECTOR;
-            if offsets[i] > 0x7FFF_FF00 {
+            if offsets[i] / unit > 0x7FFF_FF00 {
                 return Err(Error::Invalid("archive too large (over 2 GiB)".into()));
             }
         }
@@ -270,7 +312,7 @@ pub(crate) fn write_rpf2<W: Write + ?Sized>(tree: &Tree, w: &mut W) -> Result<u6
             toc.extend_from_slice(&count.to_le_bytes());
             continue;
         }
-        let off = offsets[i] as u32;
+        let off = (offsets[i] / unit) as u32;
         match f.file.unwrap() {
             FileData::Binary { stored, compressed, size } => {
                 let s = stored.len() as u32;
@@ -292,7 +334,7 @@ pub(crate) fn write_rpf2<W: Write + ?Sized>(tree: &Tree, w: &mut W) -> Result<u6
     toc.extend_from_slice(&names);
 
     let mut cw = Counting { inner: w, n: 0 };
-    cw.put(&RPF2_MAGIC.to_le_bytes())?;
+    cw.put(&(if rpf4 { RPF4_MAGIC } else { RPF2_MAGIC }).to_le_bytes())?;
     cw.put(&(toc_size as u32).to_le_bytes())?;
     cw.put(&(flat.len() as u32).to_le_bytes())?;
     cw.put(&tree.header_extra.to_le_bytes())?;

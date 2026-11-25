@@ -37,6 +37,10 @@ pub enum Format {
     Rpf3,
     /// GTA IV / EFLC image archive (flat, no folders).
     Img3,
+    /// Max Payne 3 archive.
+    Rpf4,
+    /// Red Dead Redemption archive (console, big-endian). Read-only.
+    Rpf6,
 }
 
 impl Format {
@@ -46,16 +50,20 @@ impl Format {
             Format::Rpf2 => "RPF2",
             Format::Rpf3 => "RPF3",
             Format::Img3 => "IMG3",
+            Format::Rpf4 => "RPF4",
+            Format::Rpf6 => "RPF6",
         }
     }
     pub fn game(self) -> &'static str {
         match self {
             Format::Rpf7 => "GTA V",
+            Format::Rpf4 => "Max Payne 3",
+            Format::Rpf6 => "Red Dead Redemption",
             _ => "GTA IV",
         }
     }
     pub fn writable(self) -> bool {
-        self != Format::Rpf3
+        !matches!(self, Format::Rpf3 | Format::Rpf6)
     }
     pub fn has_folders(self) -> bool {
         self != Format::Img3
@@ -134,6 +142,13 @@ fn deflate(data: &[u8]) -> Result<Vec<u8>> {
 
 fn inflate(data: &[u8], hint: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(hint);
+    // Some RAGE titles store a zlib header in front of the deflate stream.
+    if data.len() > 2 && data[0] & 0x0F == 8 && u16::from_be_bytes([data[0], data[1]]) % 31 == 0 {
+        if flate2::read::ZlibDecoder::new(data).read_to_end(&mut out).is_ok() {
+            return Ok(out);
+        }
+        out.clear();
+    }
     flate2::read::DeflateDecoder::new(data)
         .read_to_end(&mut out)
         .map_err(|e| Error::Malformed(format!("decompression failed: {e}")))?;
@@ -141,7 +156,9 @@ fn inflate(data: &[u8], hint: usize) -> Result<Vec<u8>> {
 }
 
 fn parse_rsc5(data: &[u8]) -> Option<(u32, u32)> {
-    if data.len() < 12 || u32::from_le_bytes(data[0..4].try_into().unwrap()) != RSC5_MAGIC {
+    // RSC5 (GTA IV) and RSC6 (Max Payne 3, RDR); the high bit marks some
+    // platform variants.
+    if data.len() < 12 || &data[..3] != b"RSC" || !matches!(data[3] & 0x7F, 5 | 6) {
         return None;
     }
     let rtype = u32::from_le_bytes(data[4..8].try_into().unwrap());
@@ -157,6 +174,7 @@ impl FileData {
         let size = u32::try_from(data.len()).map_err(|_| Error::Invalid(format!("{name}: file over 4 GiB")))?;
         match format {
             Format::Rpf3 => Err(Error::Invalid("GTA IV audio archives (RPF3) are read-only".into())),
+            Format::Rpf6 => Err(Error::Invalid("Red Dead Redemption archives (RPF6) are read-only".into())),
             Format::Rpf7 => {
                 if parse_rsc5(&data).is_some() {
                     return Err(Error::Invalid(format!("{name} is a GTA IV resource and can't go in a GTA V archive")));
@@ -182,9 +200,9 @@ impl FileData {
                 }
                 Self::compressed_binary(data, size, 0xFF_FFFF)
             }
-            Format::Rpf2 | Format::Img3 => {
+            Format::Rpf2 | Format::Img3 | Format::Rpf4 => {
                 if resource::parse_header(&data).is_some() {
-                    return Err(Error::Invalid(format!("{name} is a GTA V resource and can't go in a GTA IV archive")));
+                    return Err(Error::Invalid(format!("{name} is a GTA V resource and can't go in a {} archive", format.game())));
                 }
                 if let Some((rtype, flags)) = parse_rsc5(&data) {
                     if format == Format::Img3 || flags & 0xC000_0000 == 0xC000_0000 {
@@ -648,9 +666,9 @@ impl Tree {
     pub fn write<W: Write + ?Sized>(&self, w: &mut W) -> Result<u64> {
         match self.format {
             Format::Rpf7 => self.write_rpf7(w, Encryption::Open),
-            Format::Rpf2 => crate::gta4::write_rpf2(self, w),
+            Format::Rpf2 | Format::Rpf4 => crate::gta4::write_rpf2(self, w),
             Format::Img3 => crate::gta4::write_img(self, w),
-            Format::Rpf3 => Err(Error::Invalid("RPF3 archives are read-only".into())),
+            Format::Rpf3 | Format::Rpf6 => Err(Error::Invalid(format!("{} archives are read-only", self.format.label()))),
         }
     }
 
