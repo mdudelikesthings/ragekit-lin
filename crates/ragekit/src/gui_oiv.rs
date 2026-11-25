@@ -50,11 +50,17 @@ impl PkgUi {
         let mut action = PkgAction::None;
         let mut open = true;
         let m = self.pkg.meta.clone();
+        // Never taller or wider than the screen, so the buttons stay reachable.
+        let screen = ctx.content_rect();
+        let max_h = (screen.height() - 40.0).max(240.0);
+        let max_w = (screen.width() - 24.0).max(320.0);
         egui::Window::new("Install package")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([620.0, 520.0])
+            .default_size([620.0_f32.min(max_w), 520.0_f32.min(max_h)])
+            .max_height(max_h)
+            .max_width(max_w)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 // Header band in the package's colors.
@@ -92,7 +98,9 @@ impl PkgUi {
 
                 match &mut self.stage {
                     Stage::Review => {
-                        egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        // Leave room below for the install options and buttons.
+                        let desc_h = (ui.available_height() - 150.0).clamp(60.0, 180.0);
+                        egui::ScrollArea::vertical().max_height(desc_h).show(ui, |ui| {
                             if !m.description.is_empty() {
                                 ui.label(m.description.trim());
                             }
@@ -155,7 +163,11 @@ impl PkgUi {
                             RichText::new("Ready to install").color(Color32::LIGHT_GREEN)
                         };
                         ui.label(summary.strong());
-                        egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                        // The log and file list can be long: scroll them together and keep
+                        // the checkbox and buttons below always on screen.
+                        let reserve = if e > 0 { 70.0 } else { 44.0 };
+                        let list_h = (ui.available_height() - reserve).max(80.0);
+                        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                             for l in &plan.log {
                                 let (c, tag) = match l.level {
                                     Level::Info => (ui.visuals().text_color(), ""),
@@ -164,13 +176,14 @@ impl PkgUi {
                                 };
                                 ui.label(RichText::new(format!("{tag}{}", l.msg)).color(c).monospace().size(11.5));
                             }
+                            ui.separator();
+                            let changes = plan.changes();
+                            ui.label(format!("Files that will change ({}):", changes.len()));
+                            for (f, write) in changes {
+                                ui.label(RichText::new(format!("{} {f}", if write { "write " } else { "delete" })).monospace().size(11.5));
+                            }
                         });
                         ui.separator();
-                        ui.label("Files that will change:");
-                        for (f, write) in plan.changes() {
-                            ui.label(RichText::new(format!("{} {f}", if write { "write " } else { "delete" })).monospace().size(11.5));
-                        }
-                        ui.add_space(4.0);
                         if e > 0 {
                             ui.checkbox(&mut self.skip_failed, "Install anyway, skipping the failed steps");
                         }
