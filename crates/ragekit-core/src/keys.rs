@@ -424,7 +424,9 @@ fn parse_ng_tables(b: &[u8]) -> Result<Box<NgTables>> {
 /// Hash search state. Targets are grouped by the length of data they cover.
 struct Searcher {
     // length -> (hash -> slot)
-    targets: Vec<((usize, usize), HashMap<[u8; 20], usize>)>, // (length, alignment)
+    // Several NG tables share a hash (272 slots, 84 distinct hashes), so one
+    // hash maps to every slot it fills.
+    targets: Vec<((usize, usize), HashMap<[u8; 20], Vec<usize>>)>, // (length, alignment)
     found: Vec<Option<Vec<u8>>>, // slot -> bytes
 }
 
@@ -438,36 +440,36 @@ const SLOTS: usize = 376;
 
 impl Searcher {
     fn new(have: &Keys) -> Self {
-        let mut by_len: HashMap<(usize, usize), HashMap<[u8; 20], usize>> = HashMap::new();
+        let mut by_len: HashMap<(usize, usize), HashMap<[u8; 20], Vec<usize>>> = HashMap::new();
         if have.aes.is_none() {
-            by_len.entry((32, 8)).or_default().insert(AES_KEY_HASH, SLOT_AES);
+            by_len.entry((32, 8)).or_default().entry(AES_KEY_HASH).or_default().push(SLOT_AES);
         }
         if have.iv_aes.is_none() {
-            by_len.entry((32, 4)).or_default().insert(IV_AES_KEY_HASH, SLOT_IV);
+            by_len.entry((32, 4)).or_default().entry(IV_AES_KEY_HASH).or_default().push(SLOT_IV);
         }
         if have.hash_lut.is_none() {
-            by_len.entry((256, 8)).or_default().insert(HASH_LUT_HASH, SLOT_LUT);
+            by_len.entry((256, 8)).or_default().entry(HASH_LUT_HASH).or_default().push(SLOT_LUT);
         }
         if have.ng_keys.is_none() {
             for (i, h) in NG_KEY_HASHES.iter().enumerate() {
-                by_len.entry((272, 8)).or_default().insert(*h, SLOT_NGK + i);
+                by_len.entry((272, 8)).or_default().entry(*h).or_default().push(SLOT_NGK + i);
             }
         }
         if have.ng_tables.is_none() {
             for (i, h) in NG_DECRYPT_TABLE_HASHES.iter().enumerate() {
-                by_len.entry((1024, 8)).or_default().insert(*h, SLOT_NGT + i);
+                by_len.entry((1024, 8)).or_default().entry(*h).or_default().push(SLOT_NGT + i);
             }
         }
         Searcher { targets: by_len.into_iter().collect(), found: vec![None; SLOTS] }
     }
 
     fn done(&self) -> bool {
-        self.targets.iter().all(|(_, m)| m.values().all(|&s| self.found[s].is_some()))
+        self.targets.iter().all(|(_, m)| m.values().flatten().all(|&s| self.found[s].is_some()))
     }
 
     fn scan(&mut self, data: &[u8], base: u64) {
         // Keep the virtual address alignment consistent across windows.
-        let hits: Vec<(usize, Vec<u8>)> = self
+        let hits: Vec<(&Vec<usize>, Vec<u8>)> = self
             .targets
             .par_iter()
             .flat_map(|((len, align), map)| {
@@ -482,13 +484,15 @@ impl Searcher {
                     .map(move |k| skip + k * align as usize)
                     .filter_map(|o| {
                         let w = &data[o..o + len];
-                        map.get(&sha1(w)).map(|&slot| (slot, w.to_vec()))
+                        map.get(&sha1(w)).map(|slots| (slots, w.to_vec()))
                     })
                     .collect::<Vec<_>>()
             })
             .collect();
-        for (slot, bytes) in hits {
-            self.found[slot].get_or_insert(bytes);
+        for (slots, bytes) in hits {
+            for &slot in slots {
+                self.found[slot].get_or_insert_with(|| bytes.clone());
+            }
         }
     }
 
