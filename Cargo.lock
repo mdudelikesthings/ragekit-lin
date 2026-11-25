@@ -2200,6 +2200,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "flate2",
+ "half",
  "image",
  "memmap2",
  "rage-formats",

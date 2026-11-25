@@ -17,14 +17,18 @@ pub mod gta4;
 pub mod gxt2;
 mod key_hashes;
 pub mod keys;
+pub mod mapdata;
 pub mod meta;
+pub mod model;
 pub mod oiv;
 pub mod rdr;
 pub mod resource;
+pub mod rsc5;
 pub mod textures;
 mod rpf7_write;
 pub mod tree;
 pub mod vfs;
+pub mod ysc;
 
 pub use archive::{Archive, Encryption, Entry, EntryKind};
 pub use blob::Blob;

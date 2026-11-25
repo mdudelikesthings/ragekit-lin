@@ -82,11 +82,39 @@ pub enum Cmd {
         #[arg(long)]
         no_backup: bool,
     },
-    /// Texture dictionaries (.ytd): list, export, replace, add, remove
-    Tex {
-        /// A .ytd on disk, or an archive
+    /// 3D models (.ydr/.ydd/.yft, .wdr/.wdd/.wft): info, export to OBJ
+    /// (with textures) or CodeWalker XML
+    Model {
+        /// A model on disk, or an archive
         file: PathBuf,
-        /// Path of the .ytd inside the archive
+        /// Path of the model inside the archive
+        path: Option<String>,
+        /// Write a Wavefront OBJ (plus .mtl and the embedded textures as PNG)
+        #[arg(long)]
+        obj: Option<PathBuf>,
+        /// Write CodeWalker XML (.ydr only; embedded textures go beside it as .dds)
+        #[arg(long)]
+        xml: Option<PathBuf>,
+        /// Build FILE (a .ydr) from CodeWalker XML instead (textures are read
+        /// as .dds files from the XML's folder)
+        #[arg(long, conflicts_with_all = ["obj", "xml", "path"])]
+        from_xml: Option<PathBuf>,
+    },
+    /// Compiled scripts (.ysc): header, native calls and strings
+    Script {
+        /// A .ysc on disk, or an archive
+        file: PathBuf,
+        /// Path of the script inside the archive
+        path: Option<String>,
+        /// Also save the raw bytecode here
+        #[arg(long)]
+        code: Option<PathBuf>,
+    },
+    /// Texture dictionaries (.ytd, GTA IV .wtd): list, export, replace, add, remove
+    Tex {
+        /// A .ytd / .wtd on disk, or an archive
+        file: PathBuf,
+        /// Path of the dictionary inside the archive
         path: Option<String>,
         /// Export every texture into this folder
         #[arg(long)]
@@ -367,6 +395,60 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
                         eprintln!("Wrote {} ({})", file.display(), human(n));
                     }
                 }
+            }
+            Ok(())
+        }
+        Cmd::Model { file, path, obj, xml, from_xml } => {
+            use ragekit_core::{model, textures};
+            if let Some(x) = from_xml {
+                let text = fs::read_to_string(x)?;
+                let bytes = model::ydr_from_xml(&text, x.parent())?;
+                let m = model::load("x.ydr", &bytes)?;
+                fs::write(file, &bytes)?;
+                println!("Wrote {} ({}, {} triangles, {} embedded textures)", file.display(), human(bytes.len() as u64), m.triangles(), m.textures.len());
+                return Ok(());
+            }
+            let (name, data) = input(file, path.as_deref(), &keys)?;
+            let m = model::load(&name, &data)?;
+            println!("{} model: {} meshes, {} triangles, {} vertices, {} embedded textures", m.game, m.meshes.len(), m.triangles(), m.vertices(), m.textures.len());
+            if let Some((lo, hi)) = m.bounds() {
+                println!("Bounds: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+            }
+            for n in &m.notes {
+                println!("  {n}");
+            }
+            if let Some(o) = obj {
+                let stem = o.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+                let mtl = format!("{stem}.mtl");
+                let (text, mtl_text) = m.to_obj(&mtl);
+                let dir = o.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+                fs::create_dir_all(dir)?;
+                fs::write(o, text)?;
+                fs::write(dir.join(&mtl), mtl_text)?;
+                for t in &m.textures {
+                    if let Ok(png) = textures::to_png(t) {
+                        fs::write(dir.join(format!("{}.png", ops::safe_name(&t.name)?)), png)?;
+                    }
+                }
+                eprintln!("Wrote {} (+ {mtl} and {} textures)", o.display(), m.textures.len());
+            }
+            if let Some(x) = xml {
+                if !name.to_ascii_lowercase().ends_with(".ydr") {
+                    bail!("CodeWalker XML export is for .ydr files");
+                }
+                let text = model::ydr_to_xml(&data, x.parent().filter(|p| !p.as_os_str().is_empty()).or(Some(std::path::Path::new("."))))?;
+                fs::write(x, text)?;
+                eprintln!("Wrote {}", x.display());
+            }
+            Ok(())
+        }
+        Cmd::Script { file, path, code } => {
+            let (_, data) = input(file, path.as_deref(), &keys)?;
+            let sc = ragekit_core::ysc::parse(&data)?;
+            print!("{}", sc.report());
+            if let Some(c) = code {
+                fs::write(c, &sc.code)?;
+                eprintln!("Wrote {} bytes of bytecode to {}", sc.code.len(), c.display());
             }
             Ok(())
         }
@@ -748,6 +830,17 @@ fn keys_cmd(dir: &std::path::Path, k: &KeysCmd) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// A file's name and bytes: from disk, or from inside an archive.
+fn input(file: &std::path::Path, path: Option<&str>, keys: &dyn Fn() -> Result<Arc<Keys>>) -> Result<(String, Vec<u8>)> {
+    match path {
+        Some(p) => {
+            let t = open(file, keys()?)?;
+            Ok((p.rsplit('/').next().unwrap_or(p).to_string(), t.read(p)?))
+        }
+        None => Ok((file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), fs::read(file)?)),
     }
 }
 

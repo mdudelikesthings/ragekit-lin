@@ -3,6 +3,8 @@
 
 mod cli;
 mod gui;
+mod gui_map;
+mod gui_model;
 mod gui_oiv;
 mod gui_tex;
 mod ops;

@@ -1,5 +1,6 @@
-//! GTA V texture dictionaries (`.ytd`): list, decode, export, and (for
-//! Legacy-edition files) replace, add and remove textures.
+//! Texture dictionaries: GTA V `.ytd` (list, decode, export; replace, add
+//! and remove for Legacy-edition files) and GTA IV `.wtd` / textures
+//! embedded in GTA IV models (list, decode, export, replace in place).
 //!
 //! Decoding/encoding uses the public-domain `rage-formats` crate.
 //! Enhanced (gen9) dictionaries can be viewed and exported; writing them
@@ -18,13 +19,68 @@ fn err(e: impl std::fmt::Display) -> Error {
 pub struct Dict {
     pub textures: Vec<YtdTexture>,
     pub enhanced: bool,
+    /// Set for GTA IV dictionaries: the resource and where each texture's
+    /// pixels live in it.
+    pub iv: Option<IvBacking>,
+}
+
+pub struct IvBacking {
+    pub res: crate::rsc5::Rsc5,
+    /// (graphics offset, byte length) per texture, in `textures` order.
+    pub slots: Vec<(usize, usize)>,
 }
 
 pub fn is_ytd(data: &[u8]) -> bool {
     matches!(crate::resource::parse_header(data), Some((13, _, _)) | Some((5, _, _)))
 }
 
+/// A GTA IV texture dictionary (`.wtd`)?
+pub fn is_wtd(name: &str, data: &[u8]) -> bool {
+    crate::rsc5::is_rsc5(data) && name.to_ascii_lowercase().ends_with(".wtd")
+}
+
+/// Is this a texture dictionary ragekit can open (by name and contents)?
+pub fn is_texture_dict(name: &str, data: &[u8]) -> bool {
+    is_ytd(data) || is_wtd(name, data)
+}
+
+fn row_pitch(format: TextureFormat, w: u16) -> u16 {
+    let w = w as u32;
+    (match format {
+        TextureFormat::DXT1 => w.div_ceil(4).max(1) * 8,
+        TextureFormat::DXT3 | TextureFormat::DXT5 => w.div_ceil(4).max(1) * 16,
+        TextureFormat::L8 => w,
+        _ => w * 4,
+    }) as u16
+}
+
+/// Textures of a GTA IV dictionary at system offset `at` of `res`.
+pub fn load_iv_at(res: crate::rsc5::Rsc5, at: usize) -> Result<Dict> {
+    let infos = crate::rsc5::texture_dict_at(&res, at)?;
+    let mut textures = Vec::new();
+    let mut slots = Vec::new();
+    for t in infos {
+        let format = TextureFormat::from_u32(t.format);
+        textures.push(YtdTexture {
+            name_hash: rage_formats::rage_joaat(&t.name.to_ascii_lowercase()),
+            name: t.name,
+            width: t.width,
+            height: t.height,
+            depth: 1,
+            format,
+            levels: t.levels,
+            stride: row_pitch(format, t.width),
+            pixel_data: res.graphics_slice(t.data_offset, t.data_len)?.to_vec(),
+        });
+        slots.push((t.data_offset, t.data_len));
+    }
+    Ok(Dict { textures, enhanced: false, iv: Some(IvBacking { res, slots }) })
+}
+
 pub fn load(data: &[u8]) -> Result<Dict> {
+    if crate::rsc5::is_rsc5(data) {
+        return load_iv_at(crate::rsc5::Rsc5::parse(data)?, 0);
+    }
     let edition = Edition::of_file("ytd", data).map_err(err)?;
     let enhanced = edition == Some(Edition::Gen9);
     let textures = if enhanced {
@@ -33,7 +89,7 @@ pub fn load(data: &[u8]) -> Result<Dict> {
     } else {
         ytd::parse_ytd(data).map_err(err)?
     };
-    Ok(Dict { textures, enhanced })
+    Ok(Dict { textures, enhanced, iv: None })
 }
 
 pub fn format_name(f: TextureFormat) -> &'static str {
@@ -115,6 +171,57 @@ impl Dict {
         Ok(())
     }
 
+    fn check_not_iv(&self, what: &str) -> Result<()> {
+        if self.iv.is_some() {
+            return Err(Error::Invalid(format!("{what} isn't supported for GTA IV dictionaries; replace textures instead")));
+        }
+        Ok(())
+    }
+
+    /// Can textures be added, removed and renamed (not just replaced)?
+    pub fn can_restructure(&self) -> bool {
+        !self.enhanced && self.iv.is_none()
+    }
+
+    /// GTA IV: replace in place. The new texture is converted to the old
+    /// one's size, format and mip count, so the resource layout is unchanged.
+    fn replace_iv(&mut self, i: usize, file: &[u8]) -> Result<()> {
+        let old = &self.textures[i];
+        let fmt = encode_format_of(old.format).ok_or_else(|| Error::Invalid(format!("{}: can't encode {}", old.name, format_name(old.format))))?;
+        let (w, h) = (old.width as u32, old.height as u32);
+        let new = if file.starts_with(b"DDS ") {
+            let t = rage_formats::parse_dds(file).map_err(err)?;
+            if (t.width, t.height, t.format) != (old.width, old.height, old.format) {
+                return Err(Error::Invalid(format!(
+                    "the DDS is {}x{} {}, but {} must stay {}x{} {}; use a PNG to convert automatically",
+                    t.width, t.height, format_name(t.format), old.name, w, h, format_name(old.format)
+                )));
+            }
+            t
+        } else {
+            let img = image::load_from_memory(file).map_err(|e| Error::Invalid(format!("can't read image: {e}")))?.to_rgba8();
+            let img = if img.dimensions() != (w, h) { image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3) } else { img };
+            texture_encode::encode_texture(&old.name, &img.into_raw(), w, h, fmt, None).map_err(err)?
+        };
+        let (_, len) = self.iv.as_ref().unwrap().slots[i];
+        if new.pixel_data.len() < len {
+            return Err(Error::Invalid(format!("{}: the new texture has fewer mip levels than the original ({})", old.name, old.levels)));
+        }
+        let t = &mut self.textures[i];
+        t.pixel_data = new.pixel_data[..len].to_vec();
+        Ok(())
+    }
+
+    /// Write edited GTA IV textures back into the resource.
+    fn save_iv(&self) -> Result<Vec<u8>> {
+        let iv = self.iv.as_ref().unwrap();
+        let mut res = crate::rsc5::Rsc5 { magic: iv.res.magic, rtype: iv.res.rtype, flags: iv.res.flags, system: iv.res.system.clone(), graphics: iv.res.graphics.clone() };
+        for (t, &(off, len)) in self.textures.iter().zip(&iv.slots) {
+            res.graphics[off..off + len].copy_from_slice(&t.pixel_data[..len]);
+        }
+        res.to_bytes()
+    }
+
     pub fn find(&self, name: &str) -> Option<usize> {
         self.textures.iter().position(|t| t.name.eq_ignore_ascii_case(name))
     }
@@ -124,6 +231,9 @@ impl Dict {
     pub fn replace(&mut self, name: &str, file: &[u8]) -> Result<()> {
         self.check_writable()?;
         let i = self.find(name).ok_or_else(|| Error::NotFound(format!("texture {name}")))?;
+        if self.iv.is_some() {
+            return self.replace_iv(i, file);
+        }
         let old_name = self.textures[i].name.clone();
         let fmt = encode_format_of(self.textures[i].format);
         self.textures[i] = texture_from_file(&old_name, file, fmt)?;
@@ -133,6 +243,9 @@ impl Dict {
     /// Add a new texture (or replace one with the same name).
     pub fn add(&mut self, name: &str, file: &[u8]) -> Result<()> {
         self.check_writable()?;
+        if self.iv.is_some() && self.find(name).is_none() {
+            self.check_not_iv("adding textures")?;
+        }
         if self.find(name).is_some() {
             return self.replace(name, file);
         }
@@ -143,6 +256,7 @@ impl Dict {
 
     pub fn remove(&mut self, name: &str) -> Result<()> {
         self.check_writable()?;
+        self.check_not_iv("removing textures")?;
         let i = self.find(name).ok_or_else(|| Error::NotFound(format!("texture {name}")))?;
         self.textures.remove(i);
         Ok(())
@@ -150,6 +264,7 @@ impl Dict {
 
     pub fn rename(&mut self, name: &str, new_name: &str) -> Result<()> {
         self.check_writable()?;
+        self.check_not_iv("renaming textures")?;
         if self.find(new_name).is_some() {
             return Err(Error::Invalid(format!("{new_name} already exists")));
         }
@@ -162,6 +277,9 @@ impl Dict {
     /// Build the `.ytd` file.
     pub fn save(&self) -> Result<Vec<u8>> {
         self.check_writable()?;
+        if self.iv.is_some() {
+            return self.save_iv();
+        }
         let mut tex = self.textures.clone();
         // The game looks textures up by hash with a binary search.
         tex.sort_by_key(|t| t.name_hash);
@@ -185,7 +303,7 @@ mod tests {
 
     #[test]
     fn build_edit_and_read_back() {
-        let mut d = Dict { textures: vec![], enhanced: false };
+        let mut d = Dict { textures: vec![], enhanced: false, iv: None };
         d.add("vehicle_generic_d", &png(64, 32, false)).unwrap();
         d.add("vehicle_glass", &png(32, 32, true)).unwrap();
         let bytes = d.save().unwrap();
@@ -217,9 +335,9 @@ mod tests {
 
     #[test]
     fn rejects_bad_sizes() {
-        let mut d = Dict { textures: vec![], enhanced: false };
+        let mut d = Dict { textures: vec![], enhanced: false, iv: None };
         assert!(d.add("odd", &png(30, 30, false)).is_err());
-        let mut e = Dict { textures: vec![], enhanced: true };
+        let mut e = Dict { textures: vec![], enhanced: true, iv: None };
         assert!(e.add("x", &png(32, 32, false)).is_err());
     }
 }

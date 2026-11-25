@@ -16,6 +16,8 @@ use ragekit_core::vfs::{self, Game, Hit};
 use ragekit_core::{Keys, RowKind, Tree};
 
 use crate::gui_oiv::{installed_window, PkgAction, PkgUi, Stage};
+use crate::gui_map::{MapAction, MapEditor};
+use crate::gui_model::{ModelAction, ModelViewer};
 use crate::gui_tex::{TexAction, TexSource, TexViewer};
 use crate::ops::{self, human, join};
 
@@ -170,6 +172,8 @@ struct App {
     keys_window: bool,
     pkg_ui: Option<PkgUi>,
     tex_viewer: Option<TexViewer>,
+    model_viewer: Option<ModelViewer>,
+    map_editor: Option<MapEditor>,
     installs_window: bool,
     pending_uninstall: Option<String>,
     dialog: Dialog,
@@ -213,6 +217,8 @@ impl App {
             keys_window: false,
             pkg_ui: None,
             tex_viewer: None,
+            model_viewer: None,
+            map_editor: None,
             installs_window: false,
             pending_uninstall: None,
             dialog: Dialog::None,
@@ -723,10 +729,7 @@ impl App {
         let Some(data) = self.selected_bytes(name) else { return };
         match ragekit_core::textures::load(&data) {
             Ok(dict) => {
-                let source = match &self.loc.inner {
-                    None => TexSource::Disk(self.loc.disk.join(name)),
-                    Some(i) => TexSource::Archive { disk: self.loc.disk.clone(), inner: join(i, name) },
-                };
+                let source = self.source_of(name);
                 self.tex_viewer = Some(TexViewer::new(name.to_string(), source, dict));
             }
             Err(e) => self.error("Textures", &format!("{name}: {e}")),
@@ -734,51 +737,142 @@ impl App {
     }
 
     fn textures_ui(&mut self, ctx: &egui::Context) {
-        let Some(v) = &mut self.tex_viewer else { return };
-        let can_edit = match &v.source {
-            TexSource::Disk(_) => true,
-            TexSource::Archive { disk, .. } => {
-                self.edit_mode && &self.loc.disk == disk && self.opened.get(disk).is_some_and(|o| o.tree.format.writable())
-            }
-        };
+        let Some(v) = &self.tex_viewer else { return };
+        let can_edit = self.can_write(&v.source);
+        let v = self.tex_viewer.as_mut().unwrap();
         match v.show(ctx, can_edit) {
             TexAction::None => {}
             TexAction::Close => self.tex_viewer = None,
             TexAction::Message(t, m) => self.dialog = Dialog::Message { title: t, body: m },
-            TexAction::Save(bytes) => match v.source.clone() {
-                TexSource::Archive { disk, inner } => {
-                    let res = self.tree(&disk).map_err(|e| e.to_string()).and_then(|o| {
-                        o.tree.insert_bytes(&inner, bytes).map_err(|e| e.to_string())?;
-                        o.dirty = true;
-                        Ok(())
-                    });
-                    self.invalidate(&disk);
-                    match res {
-                        Ok(()) => self.status = format!("Updated {inner} — remember to Save the archive"),
-                        Err(e) => self.error("Textures", &e),
+            TexAction::Save(bytes) => {
+                let src = v.source.clone();
+                self.write_back(src, bytes, "Textures");
+            }
+        }
+    }
+
+    /// Where a file shown in a viewer lives, for saving it back.
+    fn source_of(&self, name: &str) -> TexSource {
+        match &self.loc.inner {
+            None => TexSource::Disk(self.loc.disk.join(name)),
+            Some(i) => TexSource::Archive { disk: self.loc.disk.clone(), inner: join(i, name) },
+        }
+    }
+
+    /// May a viewer opened from `source` save into it?
+    fn can_write(&self, source: &TexSource) -> bool {
+        match source {
+            TexSource::Disk(_) => true,
+            TexSource::Archive { disk, .. } => self.edit_mode && &self.loc.disk == disk && self.opened.get(disk).is_some_and(|o| o.tree.format.writable()),
+        }
+    }
+
+    /// Save edited bytes back where they came from: into the open archive
+    /// (marked unsaved) or over the loose file (keeping a .bak).
+    fn write_back(&mut self, source: TexSource, bytes: Vec<u8>, what: &str) {
+        match source {
+            TexSource::Archive { disk, inner } => {
+                let res = self.tree(&disk).map_err(|e| e.to_string()).and_then(|o| {
+                    o.tree.insert_bytes(&inner, bytes).map_err(|e| e.to_string())?;
+                    o.dirty = true;
+                    Ok(())
+                });
+                self.invalidate(&disk);
+                match res {
+                    Ok(()) => self.status = format!("Updated {inner} — remember to Save the archive"),
+                    Err(e) => self.error(what, &e),
+                }
+            }
+            TexSource::Disk(path) => {
+                let res = (|| -> Result<()> {
+                    let mut b = path.as_os_str().to_owned();
+                    b.push(".bak");
+                    let b = PathBuf::from(b);
+                    if !b.exists() {
+                        fs::copy(&path, &b)?;
+                    }
+                    ops::write_atomic(&path, |w| {
+                        w.write_all(&bytes)?;
+                        Ok(bytes.len() as u64)
+                    })?;
+                    Ok(())
+                })();
+                self.cache.clear();
+                match res {
+                    Ok(()) => self.status = format!("Saved {} (backup: .bak)", path.display()),
+                    Err(e) => self.error(what, &format!("{e:#}")),
+                }
+            }
+        }
+    }
+
+    // ---- models -------------------------------------------------------
+
+    fn open_model(&mut self, name: &str) {
+        let Some(data) = self.selected_bytes(name) else { return };
+        let model = match ragekit_core::model::load(name, &data) {
+            Ok(m) => m,
+            Err(e) => return self.error("Model", &format!("{name}: {e}")),
+        };
+        // Texture dictionaries next to the model with the same stem
+        // (adder_hi.yft -> adder.ytd).
+        let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_ascii_lowercase();
+        let stem = stem.strip_suffix("_hi").unwrap_or(&stem).to_string();
+        let rows = self.rows(&self.loc.clone()).unwrap_or_default();
+        let mut extra = Vec::new();
+        for r in rows {
+            let l = r.name.to_ascii_lowercase();
+            if r.kind == RowKind::File && (l == format!("{stem}.ytd") || l == format!("{stem}.wtd") || l == format!("{stem}+hi.ytd")) {
+                if let Some(d) = self.selected_bytes(&r.name) {
+                    if let Ok(dict) = ragekit_core::textures::load(&d) {
+                        extra.push(dict);
                     }
                 }
-                TexSource::Disk(path) => {
-                    let res = (|| -> Result<()> {
-                        let mut b = path.as_os_str().to_owned();
-                        b.push(".bak");
-                        let b = PathBuf::from(b);
-                        if !b.exists() {
-                            fs::copy(&path, &b)?;
-                        }
-                        ops::write_atomic(&path, |w| {
-                            w.write_all(&bytes)?;
-                            Ok(bytes.len() as u64)
-                        })?;
-                        Ok(())
-                    })();
-                    self.cache.clear();
-                    match res {
-                        Ok(()) => self.status = format!("Saved {} (backup: .bak)", path.display()),
-                        Err(e) => self.error("Textures", &format!("{e:#}")),
-                    }
+            }
+        }
+        self.model_viewer = Some(ModelViewer::new(name.to_string(), model, data, extra));
+    }
+
+    fn models_ui(&mut self, ctx: &egui::Context) {
+        let Some(v) = &mut self.model_viewer else { return };
+        match v.show(ctx) {
+            ModelAction::None => {}
+            ModelAction::Close => self.model_viewer = None,
+            ModelAction::Message(t, m) => self.dialog = Dialog::Message { title: t, body: m },
+        }
+    }
+
+    // ---- map data -----------------------------------------------------
+
+    fn open_map(&mut self, name: &str) {
+        let Some(data) = self.selected_bytes(name) else { return };
+        let Some(kind) = ragekit_core::mapdata::kind_of(name) else { return };
+        let text = String::from_utf8_lossy(&data).into_owned();
+        match ragekit_core::mapdata::MapFile::parse(&text, kind) {
+            Ok(f) => {
+                let source = self.source_of(name);
+                self.map_editor = Some(MapEditor::new(name.to_string(), source, f));
+            }
+            Err(e) => self.error("Map data", &format!("{name}: {e}")),
+        }
+    }
+
+    fn maps_ui(&mut self, ctx: &egui::Context) {
+        let Some(v) = &self.map_editor else { return };
+        let can = self.can_write(&v.source);
+        let v = self.map_editor.as_mut().unwrap();
+        match v.show(ctx, can) {
+            MapAction::None => {}
+            MapAction::Close => {
+                if v.changed {
+                    self.status = format!("Closed {} without saving changes", v.title);
                 }
-            },
+                self.map_editor = None;
+            }
+            MapAction::Save(bytes) => {
+                let src = v.source.clone();
+                self.write_back(src, bytes, "Map data");
+            }
         }
     }
 
@@ -869,7 +963,28 @@ impl App {
         self.preview = Some(match data {
             Err(e) => Preview::Error(e),
             Ok(d) => {
-                if ragekit_core::textures::is_ytd(&d) {
+                if ragekit_core::model::is_model_name(&name) {
+                    match ragekit_core::model::load(&name, &d) {
+                        Ok(m) => {
+                            lines.push(format!("{} model · {} meshes · {} triangles · {} embedded textures", m.game, m.meshes.len(), m.triangles(), m.textures.len()));
+                            lines.push("Double-click to open the 3D viewer".into());
+                            lines.extend(m.notes.iter().take(20).cloned());
+                        }
+                        Err(e) => lines.push(format!("Can't show this model: {e}")),
+                    }
+                    self.preview = Some(Preview::Info { name, lines });
+                    return;
+                }
+                if ragekit_core::ysc::is_ysc(&name) {
+                    if let Ok(sc) = ragekit_core::ysc::parse(&d) {
+                        self.preview = Some(Preview::Text { name: format!("{name}  (script: header, natives, strings)"), text: sc.report(), truncated: false });
+                        return;
+                    }
+                }
+                if ragekit_core::mapdata::kind_of(&name).is_some() {
+                    lines.push("Double-click to edit as a table".into());
+                }
+                if ragekit_core::textures::is_texture_dict(&name, &d) {
                     if let Ok(dict) = ragekit_core::textures::load(&d) {
                         lines.push(format!("{} textures{} · double-click to open the texture viewer", dict.textures.len(), if dict.enhanced { " (Enhanced)" } else { "" }));
                         for t in dict.textures.iter().take(200) {
@@ -980,8 +1095,14 @@ impl App {
             }
             RowKind::File => {
                 self.selected = [row.name.clone()].into();
-                if row.name.to_ascii_lowercase().ends_with(".ytd") {
-                    self.open_textures(&row.name.clone());
+                let n = row.name.clone();
+                let l = n.to_ascii_lowercase();
+                if l.ends_with(".ytd") || l.ends_with(".wtd") {
+                    self.open_textures(&n);
+                } else if ragekit_core::model::is_model_name(&n) {
+                    self.open_model(&n);
+                } else if ragekit_core::mapdata::kind_of(&n).is_some() {
+                    self.open_map(&n);
                 }
             }
         }
@@ -1261,6 +1382,8 @@ impl eframe::App for App {
         self.keys_ui(ctx);
         self.packages_ui(ctx);
         self.textures_ui(ctx);
+        self.models_ui(ctx);
+        self.maps_ui(ctx);
         self.setup_ui(ctx);
         self.tools_ui(ctx);
         self.dialogs(ctx);
@@ -1777,8 +1900,17 @@ impl App {
                 let _ = std::process::Command::new("xdg-open").arg(&self.loc.disk).spawn();
                 ui.close();
             }
-            if sel.len() == 1 && sel[0].to_ascii_lowercase().ends_with(".ytd") && ui.button("Open texture viewer").clicked() {
+            let lname = if sel.len() == 1 { sel[0].to_ascii_lowercase() } else { String::new() };
+            if (lname.ends_with(".ytd") || lname.ends_with(".wtd")) && ui.button("Open texture viewer").clicked() {
                 self.open_textures(&sel[0].clone());
+                ui.close();
+            }
+            if is_file && ragekit_core::model::is_model_name(&lname) && ui.button("Open 3D viewer").clicked() {
+                self.open_model(&sel[0].clone());
+                ui.close();
+            }
+            if is_file && ragekit_core::mapdata::kind_of(&lname).is_some() && ui.button("Open map data editor").clicked() {
+                self.open_map(&sel[0].clone());
                 ui.close();
             }
             if is_meta && ui.button(format!("Export as {tname}…")).clicked() {

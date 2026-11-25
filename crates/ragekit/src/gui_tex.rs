@@ -1,4 +1,4 @@
-//! Texture dictionary (.ytd) viewer window.
+//! Texture dictionary (.ytd / .wtd) viewer window.
 
 use std::collections::HashMap;
 
@@ -168,7 +168,8 @@ impl TexViewer {
                                         }
                                     }
                                 }
-                                if ui.button("Add…").clicked() {
+                                let restructure = self.dict.can_restructure();
+                                if restructure && ui.button("Add…").clicked() {
                                     if let Some(files) = rfd::FileDialog::new().add_filter("Images", &["png", "dds", "jpg", "jpeg", "tga", "bmp", "webp"]).pick_files() {
                                         for p in files {
                                             let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -179,7 +180,10 @@ impl TexViewer {
                                         self.invalidate();
                                     }
                                 }
-                                if ui.button("Remove").clicked() {
+                                if !restructure {
+                                    ui.label(RichText::new("GTA IV: replacements keep each texture's size and format").weak().small());
+                                }
+                                if restructure && ui.button("Remove").clicked() {
                                     if self.dict.remove(&t.name).is_ok() {
                                         self.invalidate();
                                     }

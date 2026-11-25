@@ -12,7 +12,10 @@ A native Linux modding tool for **GTA V**, **GTA IV / Episodes from Liberty City
 | Browse, search, preview, extract | ✓ | ✓ | ✓ |
 | Add, replace, rename, delete, new folder | ✓ (written as OpenIV-style OPEN archives) | ✓ (written unencrypted, which the game accepts) | ✓ (written unencrypted) |
 | Resources | RSC7 (`.ytd`, `.ydr`, `.yft`, `.ymap`…) | RSC5 (`.wtd`, `.wdr`, `.wft`…) | RSC6, kept as is |
-| Textures (`.ytd`) | view, export PNG/DDS; replace/add/remove (Legacy; Enhanced is view/export) | — | — |
+| Textures | `.ytd`: view, export PNG/DDS; replace/add/remove (Legacy; Enhanced is view/export) | `.wtd` and textures inside models: view, export, replace | — |
+| 3D models | `.ydr`, `.ydd`, `.yft`: textured viewer, export OBJ; `.ydr` ⇄ CodeWalker XML | `.wdr`, `.wdd`, `.wft`: textured viewer, export OBJ | — |
+| Map data | — | `.ide` / `.ipl` (text): table editor | — |
+| Scripts (`.ysc`) | header, native calls and strings | — | — |
 | Text tables (`.gxt2`) | view, export/import as text | — | — |
 | Add-on vehicles | folder of `.yft`/`.ytd`/`.meta` → installable DLC pack or `.oiv` | — | — |
 | Binary metadata | PSO (`.ymt`, `.ymf`), RSC7 Meta (`.ytyp`, `.ymap`, ped `.ymt`), RBF: view, export and edit as XML | — | — |
@@ -38,9 +41,33 @@ Exported files use the same form as OpenIV, CodeWalker and SparkIV, so files mov
 
 ### Textures
 
-Double-click a `.ytd` to open the texture viewer. It lists every texture with its size, format and mip count, and shows a preview on a transparency checkerboard. You can export one texture or all of them as PNG or DDS. In edit mode, **Replace…** takes a PNG, JPEG, TGA, BMP or DDS and keeps the texture's name and format, building mipmaps automatically. **Add…** and **Remove** work too.
+Double-click a `.ytd` (GTA V) or `.wtd` (GTA IV) to open the texture viewer. It lists every texture with its size, format and mip count, and shows a preview on a transparency checkerboard. You can export one texture or all of them as PNG or DDS. In edit mode, **Replace…** takes a PNG, JPEG, TGA, BMP or DDS and keeps the texture's name and format, building mipmaps automatically. **Add…** and **Remove** work too.
 
 ![Texture viewer](docs/textures.png)
+
+GTA IV dictionaries can't change shape, because the game reads them in place: **Replace…** converts your image to the original texture's size, format and mip count (a PNG of a different size is resized), and adding, removing or renaming textures is turned off.
+
+### 3D models
+
+Double-click a model to open the viewer. It handles GTA V `.ydr`, `.ydd` and `.yft`, and GTA IV `.wdr`, `.wdd` and `.wft`. Drag to rotate, right-drag to pan, scroll to zoom and double-click to reset. You can turn on a wireframe, turn textures off, and hide single meshes.
+
+- **Textures:** textures embedded in the model are used, along with a texture dictionary of the same name in the same folder (`adder.yft` uses `adder.ytd`). **Load textures…** adds any other `.ytd` or `.wtd`.
+- **Export OBJ…** writes a Wavefront OBJ with its `.mtl` and the textures as PNG, ready for Blender.
+- **Export XML…** (`.ydr`) writes CodeWalker XML, with embedded textures as `.dds` files beside it. `ragekit model x.ydr --from-xml x.ydr.xml` builds a `.ydr` back from that XML.
+
+The viewer is a small software renderer, so it needs no GPU setup. It shows the highest level of detail. GTA V fragments place their wheels and parts; GTA IV fragments show only the main body for now.
+
+![Model viewer](docs/model-viewer.png)
+
+### Map data (GTA IV)
+
+Double-click a text `.ide` (item definitions) or `.ipl` (placements) to edit it as a table, one tab per section (`objs`, `inst`, `cars`…). Common columns have names. You can filter rows, edit cells, duplicate, add or delete rows, and add sections. Lines you don't touch are written back exactly as they were, comments included. Loose files are saved with a `.bak`. Files inside archives need edit mode, like any other change.
+
+![Map data editor](docs/map-editor.png)
+
+### Scripts (GTA V)
+
+Selecting a `.ysc` shows its name, code size, parameter, static and global counts, every native it calls (as the hashes the game resolves) and its string table. `ragekit script` prints the same and can save the raw bytecode. Scripts are replaced like any other file. Decompiling bytecode isn't included.
 
 ### Finding your games and checking your mod setup
 
@@ -152,8 +179,12 @@ ragekit rm  "$G/mods/update/update.rpf" common/data/some.meta
 ragekit mv  "$G/mods/update/update.rpf" common/data/a.meta b.meta
 ragekit pack my_dlc/ -o dlc.rpf                         # GTA V (folders named *.rpf nest)
 
-# Textures, text tables, tools
-ragekit tex   "$G/x64/vehicles.rpf" adder.ytd                     # list textures
+# Textures, models, text tables, tools
+ragekit tex   "$G/x64/vehicles.rpf" adder.ytd                     # list textures (also GTA IV .wtd)
+ragekit model "$G/x64/vehicles.rpf" adder.yft --obj out/adder.obj  # info + OBJ/MTL/PNG export
+ragekit model prop.ydr --xml prop.ydr.xml                          # CodeWalker XML (+ .dds)
+ragekit model prop.ydr --from-xml prop.ydr.xml                     # and back
+ragekit script "$G/update/update.rpf" x64/levels/gta5/script/script_rel.rpf/main.ysc
 ragekit tex   my.ytd --export out/ [--dds]                           # export all
 ragekit tex   my.ytd --replace adder_badges=new.png --add decal.png  # edit (keeps a .bak)
 ragekit xml   "$G/update/update.rpf" x64/data/lang/americandlc.rpf/global.gxt2 > text.txt
@@ -195,16 +226,18 @@ ragekit pack my_files/ -o mymod.rpf --format mp3
 2. ~~GTA IV archives, file browser, single tool~~
 3. ~~`.oiv` package installer~~
 4. ~~Binary metadata (PSO, RSC7 Meta, RBF) as XML~~
-5. ~~Texture viewer and replacer for GTA V `.ytd`~~ (GTA IV `.wtd` and Enhanced writing to do)
-5b. GTA IV `.ide`/`.ipl` editors
-6. Model viewer (`.ydr`, `.yft`, `.wdr`, `.wft`)
-7. NG re-encryption and `.ysc` import for GTA V
+5. ~~Texture viewer and replacer for GTA V `.ytd` and GTA IV `.wtd`~~ (Enhanced writing to do)
+6. ~~GTA IV `.ide`/`.ipl` editor, GTA V `.ysc` viewer~~ (binary GTA IV `.wpl` placements to do)
+7. ~~Model viewer (`.ydr`, `.ydd`, `.yft`, `.wdr`, `.wdd`, `.wft`), OBJ export~~ (Enhanced models, GTA IV fragment parts, Max Payne 3 models to do)
+8. Audio (`.awc`), Max Payne 3 textures and models, NG re-encryption for GTA V
 
 ## Known limits
 
 - **Not yet tested on real game files.** Every format is tested on synthetic archives built to the documented layouts. Please report any archive that fails to open.
 - Edited GTA V archives are saved as OPEN archives, so the game needs a mods-folder loader (OpenIV.asi, OpenRPF or RageOpenV).
 - RPF3 (GTA IV audio) is read-only and shows names as hashes.
+- GTA IV models and `.wtd` textures, and GTA V `.ysc` headers, follow the documented layouts and are tested on files built to them, not yet on real game files. GTA V models are read by `rage-formats`, which is tested against real files.
+- Enhanced (gen9) GTA V models don't open in the viewer yet.
 - Max Payne 3 and RDR support follows the documented archive layouts and hasn't been checked against the PC game files yet. Whether Max Payne 3 loads an unencrypted edited archive in place of an encrypted one is untested.
 - RDR RPF6 is read-only and console-only. Compressed files in Xbox 360 dumps use LZX (XCompress), which ragekit can't decompress yet, so those files fail to extract.
 - RDR 2 (RPF8) isn't supported: its archives use Rockstar's TFIT cipher, whose keys can't be taken from the game the same way.
@@ -212,6 +245,6 @@ ragekit pack my_files/ -o mymod.rpf --format mp3
 
 ## Credits
 
-PSO and RSC7 Meta reading and writing use the public-domain [`rage-formats`](https://github.com/VIRUXE/rage-formats) crate. RBF follows CodeWalker's Rbf.cs (MIT). The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The RPF4/RPF6 layouts follow RPFTool (twisted89) and the public-domain `rpf-archive` crate (VIRUXE). The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
+PSO and RSC7 Meta reading and writing, GTA V model parsing and CodeWalker XML conversion use the public-domain [`rage-formats`](https://github.com/VIRUXE/rage-formats) crate; its one-triangle `.ydr` XML is used as a test fixture. RBF follows CodeWalker's Rbf.cs (MIT). The `.oiv` command semantics follow the open-source CodeWalker OIV Package Installer. The RPF4/RPF6 layouts follow RPFTool (twisted89) and the public-domain `rpf-archive` crate (VIRUXE). The format details come from the GTAMods wiki, CodeWalker (crypto routines ported from GTACrypto/GTAKeys, MIT, © 2015 Neodymium) and SparkIV's documentation of the GTA IV formats. `key_hashes.rs` holds only SHA-1 hashes of key material, never the keys themselves.
 
 Not affiliated with Rockstar Games, Take-Two or the OpenIV team.
