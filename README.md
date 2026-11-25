@@ -69,13 +69,28 @@ Double-click a text `.ide` (item definitions) or `.ipl` (placements) to edit it 
 
 Selecting a `.ysc` shows its name, code size, parameter, static and global counts, every native it calls (as the hashes the game resolves) and its string table. `ragekit script` prints the same and can save the raw bytecode. Scripts are replaced like any other file. Decompiling bytecode isn't included.
 
-### Finding your games and checking your mod setup
+### Finding your games, installing modding tools and checking the setup
 
 **Games** lists GTA V and GTA IV installs found in Steam libraries (native, Flatpak and Snap, including extra library folders), in Rockstar or Epic launchers inside Proton prefixes, and in Heroic and Lutris. The first launch opens one automatically.
 
-**Games → Check mod setup** shows which ASI loader, mods-folder loader (RageOpenV, OpenRPF or OpenIV.asi) and Script Hook V are installed. It flags setups that won't work (for example, files in `mods/` but no loader), and gives the **Steam launch option Proton needs** for the loader DLL, with a Copy button.
+**Games → Mod setup and tools** installs the usual prerequisites and checks the result. **Install recommended** sets a game up in one click:
 
-![Mod setup check](docs/mod-setup.png)
+| Tool | Games | Comes from |
+|---|---|---|
+| Script Hook V (with its ASI loader) | GTA V Legacy and Enhanced | Alexander Blade's site, dev-c.com (newest version) |
+| RageOpenV, the open-source replacement for OpenIV.asi (loads `mods/`) | GTA V Legacy and Enhanced | its GitHub releases |
+| Ultimate ASI Loader (`dinput8.dll`, or `xinput1_4.dll` on Enhanced, 32-bit for GTA IV) | GTA V, GTA IV | its GitHub releases |
+| Script Hook V .NET (Enhanced edition, works on both) | GTA V | its GitHub releases |
+| FusionFix | GTA IV / EFLC | its GitHub releases |
+| OpenIV.asi | GTA V Legacy | only from your own copy (it ships inside OpenIV for Windows) |
+
+Nothing is bundled with ragekit; each tool is downloaded from its author when you install it. If a site refuses the download, **From file…** installs a zip, `.asi` or `.dll` you downloaded yourself. Installing a tool that replaces another (Script Hook V's loader over the Ultimate ASI Loader, say) removes the other first. Every install is recorded in `<game>/.ragekit/tools/` with backups of anything it overwrote, so **Remove** puts the folder back as it was.
+
+Under Proton, Wine uses its own built-in `dinput8.dll` unless told otherwise. After an install, ragekit adds the needed `WINEDLLOVERRIDES="dinput8=n,b" %command%` to the game's **Steam launch options**, keeping any options you already had. Steam must be closed for this, because it rewrites its settings when it exits. The original is kept as `localconfig.vdf.ragekit.bak`. If Steam is running, or you use Lutris or Heroic, the window shows the line to paste yourself.
+
+The same window flags setups that won't work, such as files in `mods/` with no loader, or OpenIV.asi on Enhanced.
+
+![Mod setup and tools](docs/mod-tools.png)
 
 ### Add-on vehicle packs
 
@@ -191,6 +206,10 @@ ragekit xml   "$G/update/update.rpf" x64/data/lang/americandlc.rpf/global.gxt2 >
 ragekit extract "$G/update/update.rpf" common/data -o out --convert  # + .xml/.txt copies
 ragekit games                                                        # find installs
 ragekit setup --game "$G"                                            # mod setup check
+ragekit tools list    --game "$G"                                    # modding tools for this game
+ragekit tools install --game "$G"                                    # recommended set + Steam launch options
+ragekit tools install scripthookv --game "$G" --from ~/Downloads/ScriptHookV_3889.0_1158.13.zip
+ragekit tools remove  rageopenv --game "$G"
 ragekit addon ~/cars/mycar --install "$G"                            # or --oiv mycar.oiv
 ragekit hash adder zentorno
 
@@ -241,6 +260,8 @@ ragekit pack my_files/ -o mymod.rpf --format mp3
 - Max Payne 3 and RDR support follows the documented archive layouts and hasn't been checked against the PC game files yet. Whether Max Payne 3 loads an unencrypted edited archive in place of an encrypted one is untested.
 - RDR RPF6 is read-only and console-only. Compressed files in Xbox 360 dumps use LZX (XCompress), which ragekit can't decompress yet, so those files fail to extract.
 - RDR 2 (RPF8) isn't supported: its archives use Rockstar's TFIT cipher, whose keys can't be taken from the game the same way.
+- Script Hook V only works with the game version it was built for; after a game update, install it again once its author has released a new version.
+- Script Hook V .NET needs .NET Framework 4.8 inside the game's Proton prefix (for example `protontricks 271590 dotnet48`).
 - Use mods in single-player only.
 
 ## Credits

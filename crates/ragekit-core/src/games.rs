@@ -40,7 +40,7 @@ pub fn vdf_paths(text: &str) -> Vec<PathBuf> {
     out
 }
 
-fn steam_roots(home: &Path) -> Vec<PathBuf> {
+pub fn steam_roots(home: &Path) -> Vec<PathBuf> {
     [
         ".steam/steam",
         ".steam/root",

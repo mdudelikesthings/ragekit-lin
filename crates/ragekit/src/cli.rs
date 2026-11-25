@@ -203,6 +203,10 @@ pub enum Cmd {
         #[arg(required = true)]
         names: Vec<String>,
     },
+    /// Install modding tools into a game folder: ASI loader, Script Hook V,
+    /// RageOpenV (mods folder), Script Hook V .NET, FusionFix
+    #[command(subcommand)]
+    Tools(ToolsCmd),
     /// Check a GTA V folder's mod setup (ASI loader, mods loader, Proton launch options)
     Setup {
         #[arg(short, long)]
@@ -246,6 +250,43 @@ pub enum OivCmd {
         /// Uninstall even if the files changed since
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ToolsCmd {
+    /// Show the tools for this game and what's installed
+    List {
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+    },
+    /// Download and install tools (no IDs: the recommended set), then set the
+    /// Steam launch options Proton needs
+    Install {
+        /// Tool IDs (see `ragekit tools list`)
+        ids: Vec<String>,
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+        /// Install from a zip / .asi / .dll you downloaded instead (one tool)
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Don't change Steam launch options
+        #[arg(long)]
+        no_launch_options: bool,
+    },
+    /// Remove a tool ragekit installed, restoring what it replaced
+    Remove {
+        id: String,
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+    },
+    /// Show (or with --apply, set) the Steam launch options for the
+    /// installed loaders
+    LaunchOptions {
+        #[arg(short, long)]
+        game: Option<PathBuf>,
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -633,6 +674,7 @@ pub fn run(cli: &Cli, cmd: &Cmd) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Tools(cmd) => tools_cmd(cmd),
         Cmd::Setup { game } => {
             let g = game_dir(game)?;
             let s = ragekit_core::games::check_mod_setup(&g);
@@ -853,6 +895,99 @@ fn report(r: ragekit_core::keys::SearchReport) {
         r.ng_tables_found,
         if r.iv_aes { "yes" } else { "no" },
     );
+}
+
+fn tools_cmd(cmd: &ToolsCmd) -> Result<()> {
+    use ragekit_core::{steamcfg, tools};
+    let target_of = |g: &std::path::Path| tools::Target::detect(g).ok_or_else(|| anyhow!("{} isn't a GTA V or GTA IV folder", g.display()));
+    let launch = |g: &std::path::Path, apply: bool| -> Result<()> {
+        let target = target_of(g)?;
+        let dlls = tools::needed_overrides(g);
+        if dlls.is_empty() {
+            println!("No ASI loader DLL installed; no launch options needed.");
+            return Ok(());
+        }
+        let opt = steamcfg::merge_launch_options("", &dlls);
+        if !apply {
+            println!("Steam launch options for Proton:\n  {opt}\n(ragekit tools launch-options --apply sets them while Steam is closed)");
+            return Ok(());
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow!("HOME not set"))?;
+        match steamcfg::apply_overrides(&home, target.steam_app_ids(), &dlls) {
+            Ok(v) if v.is_empty() => println!("No Steam settings for this game found. Add this to its launch options yourself:\n  {opt}"),
+            Ok(v) => {
+                for a in v {
+                    println!("Steam launch options ({}): {}", a.app, a.after);
+                }
+            }
+            Err(e) => println!("Couldn't set Steam launch options: {e}\nAdd this to the game's launch options yourself:\n  {opt}"),
+        }
+        Ok(())
+    };
+    match cmd {
+        ToolsCmd::List { game } => {
+            let g = game_dir(game)?;
+            let target = target_of(&g)?;
+            let inst = tools::installed(&g);
+            println!("{} at {}\n", target.label(), g.display());
+            for t in tools::tools_for(target) {
+                let state = match inst.iter().find(|r| r.tool == t.id) {
+                    Some(r) => format!("installed {}", r.version.clone().unwrap_or_default()),
+                    None => {
+                        let present = t.files.iter().any(|f| !f.contains('*') && ragekit_core::fsutil::resolve_ci(&g, f).1);
+                        if present { "found (not installed by ragekit)".into() } else { "-".into() }
+                    }
+                };
+                let rec = if tools::recommended(target).contains(&t.id) { " (recommended)" } else { "" };
+                println!("{:<12} {:<40} {state}{rec}\n             {}", t.id, t.name, t.about);
+            }
+            Ok(())
+        }
+        ToolsCmd::Install { ids, game, from, no_launch_options } => {
+            let g = game_dir(game)?;
+            let target = target_of(&g)?;
+            let ids: Vec<String> = if ids.is_empty() { tools::recommended(target).iter().map(|s| s.to_string()).collect() } else { ids.clone() };
+            if from.is_some() && ids.len() != 1 {
+                bail!("--from installs one tool; name it");
+            }
+            for id in &ids {
+                eprintln!("Installing {id} ...");
+                match tools::install_tool(&g, id, from.as_deref(), &tools::Http) {
+                    Ok((rec, notes)) => {
+                        let v = rec.version.map(|v| format!(" {v}")).unwrap_or_default();
+                        println!("{}{v} installed ({} files)", rec.name, rec.files.len());
+                        for n in notes {
+                            println!("  {n}");
+                        }
+                    }
+                    Err(e) => {
+                        println!("{id}: {e}");
+                        if let Some(t) = tools::tool(id) {
+                            println!("  You can download it from {} and run: ragekit tools install {id} --from <file>", t.page);
+                        }
+                    }
+                }
+            }
+            if !no_launch_options {
+                launch(&g, true)?;
+            }
+            Ok(())
+        }
+        ToolsCmd::Remove { id, game } => {
+            let g = game_dir(game)?;
+            let rec = tools::uninstall(&g, id)?;
+            println!("Removed {} ({} files restored or deleted)", rec.name, rec.files.len());
+            for r in tools::installed(&g) {
+                if let Some(t) = tools::tool(&r.tool) {
+                    for m in tools::check(&g, t, &[]).1 {
+                        println!("Note: {} now needs {m}", t.name);
+                    }
+                }
+            }
+            Ok(())
+        }
+        ToolsCmd::LaunchOptions { game, apply } => launch(&game_dir(game)?, *apply),
+    }
 }
 
 fn game_dir(g: &Option<PathBuf>) -> Result<PathBuf> {

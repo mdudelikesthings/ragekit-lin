@@ -97,6 +97,8 @@ enum Preview {
 
 enum JobDone {
     Msg(String),
+    /// Show a message window.
+    Report(String, String),
     Saved { disk: PathBuf, msg: String },
     Keys { keys: Keys, msg: String },
     Plan(Box<ragekit_core::oiv::Plan>),
@@ -532,55 +534,182 @@ impl App {
     }
 
     fn setup_ui(&mut self, ctx: &egui::Context) {
+        use ragekit_core::tools;
         if !self.setup_window {
             return;
         }
         let Some(root) = self.root.clone() else { return };
+        let Some(target) = tools::Target::detect(&root) else {
+            self.setup_window = false;
+            return;
+        };
+        let is_v = target != tools::Target::GtaIV;
         let s = ragekit_core::games::check_mod_setup(&root);
+        let installed = tools::installed(&root);
+        let busy = self.job.is_some();
         let mut open = true;
-        egui::Window::new("Mod setup").open(&mut open).default_width(560.0).anchor(egui::Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
-            let ok = |b: bool| if b { RichText::new("found").color(Color32::LIGHT_GREEN) } else { RichText::new("missing").color(Color32::from_rgb(255, 170, 60)) };
+        let mut run: Option<(String, Option<PathBuf>)> = None;
+        let mut install_recommended = false;
+        let mut remove: Option<String> = None;
+        let mut apply_launch = false;
+        egui::Window::new("Mod setup and tools").open(&mut open).default_width(720.0).anchor(egui::Align2::CENTER_TOP, [0.0, 70.0]).show(ctx, |ui| {
             let found = |n: &Option<String>| match n {
                 Some(n) => RichText::new(n.as_str()).color(Color32::LIGHT_GREEN),
                 None => RichText::new("missing").color(Color32::from_rgb(255, 170, 60)),
             };
-            ui.label(RichText::new(format!("GTA V {}", if s.enhanced { "Enhanced" } else { "Legacy" })).strong());
-            egui::Grid::new("setup").num_columns(2).spacing([20.0, 4.0]).show(ui, |ui| {
-                ui.label("ASI loader");
-                ui.label(found(&s.asi_loader));
-                ui.end_row();
-                ui.label("Mods-folder loader");
-                ui.label(found(&s.rpf_loader));
-                ui.end_row();
-                ui.label("Script Hook V");
-                ui.label(ok(s.script_hook));
-                ui.end_row();
-                ui.label("mods folder");
-                ui.label(if s.mods_folder { format!("{} file(s)", s.mods_files) } else { "not created yet".into() });
-                ui.end_row();
-                ui.label("ASI plugins");
-                ui.label(if s.asi_plugins.is_empty() { "none".into() } else { s.asi_plugins.join(", ") });
-                ui.end_row();
-            });
-            for p in &s.problems {
-                ui.colored_label(Color32::LIGHT_RED, p);
+            ui.label(RichText::new(format!("{} — {}", target.label(), root.display())).strong());
+            if is_v {
+                egui::Grid::new("setup").num_columns(2).spacing([20.0, 4.0]).show(ui, |ui| {
+                    ui.label("ASI loader");
+                    ui.label(found(&s.asi_loader));
+                    ui.end_row();
+                    ui.label("Mods-folder loader");
+                    ui.label(found(&s.rpf_loader));
+                    ui.end_row();
+                    ui.label("mods folder");
+                    ui.label(if s.mods_folder { format!("{} file(s)", s.mods_files) } else { "not created yet".into() });
+                    ui.end_row();
+                    ui.label("ASI plugins");
+                    ui.label(if s.asi_plugins.is_empty() { "none".into() } else { s.asi_plugins.join(", ") });
+                    ui.end_row();
+                });
+                for p in &s.problems {
+                    ui.colored_label(Color32::LIGHT_RED, p);
+                }
             }
-            if let Some(opt) = &s.launch_option {
-                ui.separator();
-                ui.label("Steam launch options for Proton:");
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Tools").strong());
+                ui.label(RichText::new("downloaded from each author's own release page").weak().small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let names: Vec<&str> = tools::recommended(target).iter().map(|id| tools::tool(id).map(|t| t.name).unwrap_or(id)).collect();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new(RichText::new("Install recommended").strong()))
+                        .on_hover_text(format!("{}, then set Steam launch options", names.join(" + ")))
+                        .clicked()
+                    {
+                        install_recommended = true;
+                    }
+                });
+            });
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| egui::Grid::new("tools").num_columns(3).striped(true).spacing([12.0, 8.0]).show(ui, |ui| {
+                for t in tools::tools_for(target) {
+                    let rec = installed.iter().find(|r| r.tool == t.id);
+                    ui.vertical(|ui| {
+                        ui.set_width(330.0);
+                        let star = if tools::recommended(target).contains(&t.id) { "  (recommended)" } else { "" };
+                        ui.label(RichText::new(format!("{}{star}", t.name)).strong());
+                        ui.label(RichText::new(t.about).small().weak());
+                    });
+                    match rec {
+                        Some(r) => ui.label(RichText::new(format!("installed {}", r.version.clone().unwrap_or_default())).color(Color32::LIGHT_GREEN)),
+                        None if t.files.iter().any(|f| !f.contains('*') && ragekit_core::fsutil::resolve_ci(&root, f).1) => ui.label("present"),
+                        None => ui.label(RichText::new("—").weak()),
+                    };
+                    ui.horizontal(|ui| {
+                        let manual = matches!(t.source, tools::Source::Manual { .. });
+                        if !manual && ui.add_enabled(!busy, egui::Button::new(if rec.is_some() { "Update" } else { "Install" })).clicked() {
+                            run = Some((t.id.to_string(), None));
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new("From file…")).on_hover_text("Install from a zip, .asi or .dll you downloaded").clicked() {
+                            if let Some(p) = rfd::FileDialog::new().add_filter("Package", &["zip", "asi", "dll"]).pick_file() {
+                                run = Some((t.id.to_string(), Some(p)));
+                            }
+                        }
+                        if rec.is_some() && ui.add_enabled(!busy, egui::Button::new("Remove")).clicked() {
+                            remove = Some(t.id.to_string());
+                        }
+                        if ui.small_button("Page").on_hover_text(t.page).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(t.page));
+                        }
+                    });
+                    ui.end_row();
+                }
+            }));
+            ui.separator();
+            let dlls = tools::needed_overrides(&root);
+            if dlls.is_empty() {
+                ui.label(RichText::new("No ASI loader installed yet, so no Proton launch options are needed.").weak());
+            } else {
+                let opt = ragekit_core::steamcfg::merge_launch_options("", &dlls);
+                ui.label("Steam launch options for Proton (so Wine loads the ASI loader):");
                 ui.horizontal(|ui| {
-                    ui.code(opt);
+                    ui.code(&opt);
                     if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(opt.clone());
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new("Set in Steam")).on_hover_text("Edits Steam's settings for this game; Steam must be closed").clicked() {
+                        apply_launch = true;
                     }
                 });
             }
             ui.separator();
-            for t in &s.tips {
-                ui.label(RichText::new(t).weak());
+            if is_v {
+                for t in &s.tips {
+                    if !t.starts_with("Under Proton") {
+                        ui.label(RichText::new(t).weak());
+                    }
+                }
+            } else {
+                ui.label(RichText::new("Mods are for single-player only.").weak());
             }
         });
         self.setup_window = open;
+
+        let apply = |root: &Path, target: tools::Target| -> String {
+            let dlls = tools::needed_overrides(root);
+            if dlls.is_empty() {
+                return String::new();
+            }
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let opt = ragekit_core::steamcfg::merge_launch_options("", &dlls);
+            match ragekit_core::steamcfg::apply_overrides(&home, target.steam_app_ids(), &dlls) {
+                Ok(v) if v.is_empty() => format!("\n\nNo Steam settings for this game were found. Add this to its launch options:\n{opt}"),
+                Ok(v) => format!("\n\nSteam launch options set: {}", v.last().map(|a| a.after.clone()).unwrap_or_default()),
+                Err(e) => format!("\n\nSteam launch options not set: {e}\nAdd this yourself:\n{opt}"),
+            }
+        };
+        if install_recommended {
+            let ids: Vec<String> = tools::recommended(target).iter().map(|s| s.to_string()).collect();
+            let r = root.clone();
+            self.start_job("Installing tools", move |prog| {
+                let mut msg = String::new();
+                for id in ids {
+                    *prog.lock().unwrap() = format!("downloading {id}");
+                    match tools::install_tool(&r, &id, None, &tools::Http) {
+                        Ok((rec, notes)) => {
+                            msg += &format!("{} {}: installed\n", rec.name, rec.version.unwrap_or_default());
+                            for n in notes {
+                                msg += &format!("   {n}\n");
+                            }
+                        }
+                        Err(e) => msg += &format!("{id}: {e}\n   Use “From file…” with a copy you downloaded.\n"),
+                    }
+                }
+                msg += &apply(&r, target);
+                Ok(JobDone::Report("Tools".into(), msg.trim().to_string()))
+            });
+        } else if let Some((id, from)) = run {
+            let r = root.clone();
+            self.start_job("Installing", move |prog| {
+                *prog.lock().unwrap() = if from.is_some() { format!("installing {id}") } else { format!("downloading {id}") };
+                let (rec, notes) = tools::install_tool(&r, &id, from.as_deref(), &tools::Http)?;
+                let mut msg = format!("{} {} installed ({} files).", rec.name, rec.version.unwrap_or_default(), rec.files.len());
+                for n in notes {
+                    msg += &format!("\n{n}");
+                }
+                msg += &apply(&r, target);
+                Ok(JobDone::Report("Tools".into(), msg))
+            });
+        } else if let Some(id) = remove {
+            match tools::uninstall(&root, &id) {
+                Ok(rec) => self.status = format!("Removed {}", rec.name),
+                Err(e) => self.error("Remove", &e.to_string()),
+            }
+        } else if apply_launch {
+            let msg = apply(&root, target);
+            self.dialog = Dialog::Message { title: "Steam launch options".into(), body: msg.trim().to_string() };
+        }
     }
 
     fn tools_ui(&mut self, ctx: &egui::Context) {
@@ -1056,6 +1185,7 @@ impl App {
                 self.error(&label, &format!("{e:#}"))
             }
             Ok(Ok(JobDone::Msg(m))) => self.status = m,
+            Ok(Ok(JobDone::Report(title, body))) => self.dialog = Dialog::Message { title, body },
             Ok(Ok(JobDone::Saved { disk, msg })) => {
                 self.opened.remove(&disk);
                 self.invalidate(&disk);
@@ -1429,8 +1559,12 @@ impl App {
                         }
                     }
                     ui.separator();
-                    let v = self.game == Some(Game::GtaV);
-                    if ui.add_enabled(v, egui::Button::new("Check mod setup…")).on_hover_text("ASI loader, mods-folder loader, Proton launch options").clicked() {
+                    let v = matches!(self.game, Some(Game::GtaV | Game::GtaIV | Game::Eflc));
+                    if ui
+                        .add_enabled(v, egui::Button::new("Mod setup and tools…"))
+                        .on_hover_text("Install Script Hook V, an ASI loader, a mods-folder loader…; check the setup; set Proton launch options")
+                        .clicked()
+                    {
                         self.setup_window = true;
                         ui.close();
                     }
