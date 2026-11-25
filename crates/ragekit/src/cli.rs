@@ -913,13 +913,13 @@ fn tools_cmd(cmd: &ToolsCmd) -> Result<()> {
             println!("No ASI loader DLL installed; no launch options needed.");
             return Ok(());
         }
-        let opt = steamcfg::merge_launch_options("", &dlls);
+        let opt = steamcfg::merge_launch_options("", &dlls, target.game_args());
         if !apply {
             println!("Steam launch options for Proton:\n  {opt}\n(ragekit tools launch-options --apply sets them while Steam is closed)");
             return Ok(());
         }
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| anyhow!("HOME not set"))?;
-        match steamcfg::apply_overrides(&home, target.steam_app_ids(), &dlls) {
+        match steamcfg::apply_overrides(&home, target.steam_app_ids(), &dlls, target.game_args()) {
             Ok(v) if v.is_empty() => println!("No Steam settings for this game found. Add this to its launch options yourself:\n  {opt}"),
             Ok(v) => {
                 for a in v {

@@ -39,9 +39,27 @@ pub fn local_configs(home: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The launch option text with the overrides for `dlls` merged into
-/// `existing` (other options kept).
-pub fn merge_launch_options(existing: &str, dlls: &[String]) -> String {
+/// The launch option text with the overrides for `dlls` and the game
+/// arguments `args` (e.g. `-nobattleye`) merged into `existing`; other
+/// options are kept.
+pub fn merge_launch_options(existing: &str, dlls: &[String], args: &[&str]) -> String {
+    let mut out = merge_overrides(existing, dlls);
+    for a in args {
+        if out.split_whitespace().any(|w| w.eq_ignore_ascii_case(a)) {
+            continue;
+        }
+        if out.is_empty() {
+            out = format!("%command% {a}");
+        } else if out.contains("%command%") {
+            out = format!("{out} {a}");
+        } else {
+            out = format!("%command% {out} {a}");
+        }
+    }
+    out
+}
+
+fn merge_overrides(existing: &str, dlls: &[String]) -> String {
     let existing = existing.trim();
     let missing: Vec<&String> = dlls
         .iter()
@@ -284,8 +302,8 @@ pub struct Applied {
 
 /// Merge the overrides into the launch options of `apps` for every Steam
 /// user found that has played (or owns) them. Refuses while Steam runs.
-pub fn apply_overrides(home: &Path, apps: &[u32], dlls: &[String]) -> Result<Vec<Applied>> {
-    if dlls.is_empty() {
+pub fn apply_overrides(home: &Path, apps: &[u32], dlls: &[String], args: &[&str]) -> Result<Vec<Applied>> {
+    if dlls.is_empty() && args.is_empty() {
         return Ok(Vec::new());
     }
     if steam_running() {
@@ -302,7 +320,7 @@ pub fn apply_overrides(home: &Path, apps: &[u32], dlls: &[String]) -> Result<Vec
                 continue;
             }
             let before = get_launch_options(&text, app)?;
-            let after = merge_launch_options(before.as_deref().unwrap_or(""), dlls);
+            let after = merge_launch_options(before.as_deref().unwrap_or(""), dlls, args);
             if before.as_deref() != Some(after.as_str()) {
                 match set_launch_options(&text, app, &after) {
                     Ok(t) => text = t,
@@ -335,15 +353,22 @@ mod tests {
     #[test]
     fn merge_rules() {
         let d = vec!["dinput8".to_string()];
-        assert_eq!(merge_launch_options("", &d), "WINEDLLOVERRIDES=\"dinput8=n,b\" %command%");
-        assert_eq!(merge_launch_options("-windowed", &d), "WINEDLLOVERRIDES=\"dinput8=n,b\" %command% -windowed");
-        assert_eq!(merge_launch_options("gamemoderun %command%", &d), "WINEDLLOVERRIDES=\"dinput8=n,b\" gamemoderun %command%");
+        assert_eq!(merge_launch_options("", &d, &[]), "WINEDLLOVERRIDES=\"dinput8=n,b\" %command%");
+        assert_eq!(merge_launch_options("-windowed", &d, &[]), "WINEDLLOVERRIDES=\"dinput8=n,b\" %command% -windowed");
+        assert_eq!(merge_launch_options("gamemoderun %command%", &d, &[]), "WINEDLLOVERRIDES=\"dinput8=n,b\" gamemoderun %command%");
         assert_eq!(
-            merge_launch_options("WINEDLLOVERRIDES=\"dxgi=n,b\" %command%", &d),
+            merge_launch_options("WINEDLLOVERRIDES=\"dxgi=n,b\" %command%", &d, &[]),
             "WINEDLLOVERRIDES=\"dxgi=n,b;dinput8=n,b\" %command%"
         );
+        assert_eq!(merge_launch_options("", &d, &["-nobattleye"]), "WINEDLLOVERRIDES=\"dinput8=n,b\" %command% -nobattleye");
+        assert_eq!(merge_launch_options("", &[], &["-nobattleye"]), "%command% -nobattleye");
+        assert_eq!(
+            merge_launch_options("WINEDLLOVERRIDES=\"dinput8,xinput1_4=n,b\" %command%", &d, &["-nobattleye"]),
+            "WINEDLLOVERRIDES=\"dinput8,xinput1_4=n,b\" %command% -nobattleye"
+        );
+        assert_eq!(merge_launch_options("%command% -nobattleye", &[], &["-nobattleye"]), "%command% -nobattleye");
         let same = "WINEDLLOVERRIDES=\"dinput8=n,b\" %command%";
-        assert_eq!(merge_launch_options(same, &d), same);
+        assert_eq!(merge_launch_options(same, &d, &[]), same);
     }
 
     #[test]

@@ -659,7 +659,7 @@ impl App {
             if dlls.is_empty() {
                 ui.label(RichText::new("No ASI loader installed yet, so no Proton launch options are needed.").weak());
             } else {
-                let opt = ragekit_core::steamcfg::merge_launch_options("", &dlls);
+                let opt = ragekit_core::steamcfg::merge_launch_options("", &dlls, target.game_args());
                 ui.label("Steam launch options for Proton (so Wine loads the ASI loader):");
                 ui.horizontal(|ui| {
                     ui.code(&opt);
@@ -690,8 +690,8 @@ impl App {
                 return String::new();
             }
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-            let opt = ragekit_core::steamcfg::merge_launch_options("", &dlls);
-            match ragekit_core::steamcfg::apply_overrides(&home, target.steam_app_ids(), &dlls) {
+            let opt = ragekit_core::steamcfg::merge_launch_options("", &dlls, target.game_args());
+            match ragekit_core::steamcfg::apply_overrides(&home, target.steam_app_ids(), &dlls, target.game_args()) {
                 Ok(v) if v.is_empty() => format!("\n\nNo Steam settings for this game were found. Add this to its launch options:\n{opt}"),
                 Ok(v) => format!("\n\nSteam launch options set: {}", v.last().map(|a| a.after.clone()).unwrap_or_default()),
                 Err(e) => format!("\n\nSteam launch options not set: {e}\nAdd this yourself:\n{opt}"),

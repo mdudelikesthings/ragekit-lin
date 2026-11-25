@@ -44,6 +44,15 @@ impl Target {
             Target::GtaIV => "GTA IV",
         }
     }
+    /// Game arguments for modded single-player under Proton. GTA V's
+    /// launcher otherwise starts the BattlEye wrapper (GTA5_BE.exe), which
+    /// can't run under Proton and exits before the game window appears.
+    pub fn game_args(self) -> &'static [&'static str] {
+        match self {
+            Target::GtaVLegacy | Target::GtaVEnhanced => &["-nobattleye"],
+            Target::GtaIV => &[],
+        }
+    }
     /// Steam app ids, for launch options.
     pub fn steam_app_ids(self) -> &'static [u32] {
         match self {
@@ -520,11 +529,19 @@ pub fn uninstall(game: &Path, id: &str) -> Result<Record> {
 
 /// The DLLs that need a `native,builtin` override under Wine/Proton for the
 /// installed loaders to run.
+///
+/// `dinput8.dll` is always an ASI loader in these games. Other names
+/// (`xinput1_4.dll`, `dsound.dll`…) are also real system DLLs that mods
+/// sometimes ship for other reasons, so they only count when a tool ragekit
+/// installed put them there; overriding an unrelated copy can stop the game
+/// from starting.
 pub fn needed_overrides(game: &Path) -> Vec<String> {
+    let recorded: Vec<String> = installed(game).into_iter().flat_map(|r| r.files.into_keys()).map(|f| f.to_ascii_lowercase()).collect();
     let mut v = Vec::new();
     for dll in ["dinput8", "xinput1_4", "dsound", "version", "winmm", "d3d9"] {
-        let (_, exists) = crate::fsutil::resolve_ci(game, &format!("{dll}.dll"));
-        if exists {
+        let file = format!("{dll}.dll");
+        let (_, exists) = crate::fsutil::resolve_ci(game, &file);
+        if exists && (dll == "dinput8" || recorded.contains(&file)) {
             v.push(dll.to_string());
         }
     }

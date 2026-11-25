@@ -213,6 +213,11 @@ pub fn check_mod_setup(dir: &Path) -> ModSetup {
             s.launch_option.as_deref().unwrap()
         ));
     }
+    if dir.join("GTA5_BE.exe").exists() && (s.asi_loader.is_some() || s.script_hook) {
+        s.problems.push(
+            "Under Proton, add -nobattleye after %command% in the launch options: otherwise the launcher starts BattlEye (GTA5_BE.exe), which exits at once and the game never opens.".into(),
+        );
+    }
     if s.mods_files > 0 && s.rpf_loader.is_none() {
         s.problems.push(format!(
             "The mods folder has {} file(s), but no mods-folder loader (OpenIV.asi, OpenRPF.asi or RageOpenV.asi) is installed, so the game won't load them.",
